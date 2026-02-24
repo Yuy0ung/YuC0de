@@ -724,6 +724,15 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 							// Recurse trace in caller
 							callerSteps, found := traceBack(callerInfo.FilePath, callerLines, k, argVal, sourcePatterns, sanitizerPatterns, depth+1, rootDir)
 							if found {
+								// Add Propagation step for the Method Call in the caller
+								callerSteps = append(callerSteps, Step{
+									FilePath:    toRelative(callerInfo.FilePath, rootDir),
+									LineNumber:  k,
+									LineContent: strings.TrimSpace(line),
+									Description: "Propagation: 方法调用 " + methodInfo.Name,
+								})
+
+								// Add Propagation step for the Parameter Entry in the callee
 								callerSteps = append(callerSteps, Step{
 									FilePath:    toRelative(path, rootDir),
 									LineNumber:  methodInfo.StartLine,
