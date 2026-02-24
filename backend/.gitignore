@@ -1,0 +1,18 @@
+# Database
+sast.db
+*.db
+*.sqlite
+
+# Binaries
+main
+backend_app
+*.exe
+*.test
+*.out
+
+# OS specific
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
