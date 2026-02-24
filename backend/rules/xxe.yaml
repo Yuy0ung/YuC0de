@@ -1,0 +1,30 @@
+id: java-xxe
+name: XML External Entity (XXE)
+severity: HIGH
+description: Detects XML parsing without disabling external entities.
+language: java
+patterns:
+  - "DocumentBuilderFactory"
+  - "SAXParserFactory"
+  - "XMLInputFactory"
+  - "TransformerFactory"
+sources:
+  - "request\\.getParameter"
+  - "request\\.getInputStream"
+  - "request\\.getReader"
+  - "@RequestParam"
+  - "@PathVariable"
+  - "@RequestBody"
+sinks:
+  - "\\.parse\\("
+  - "\\.transform\\("
+  - "\\.newDocumentBuilder\\("
+exclude_patterns:
+  - "LocalDateTime\\.parse"
+  - "Integer\\.parse"
+  - "Double\\.parse"
+  - "Long\\.parse"
+  - "Float\\.parse"
+  - "Boolean\\.parse"
+  - "Byte\\.parse"
+  - "Short\\.parse"

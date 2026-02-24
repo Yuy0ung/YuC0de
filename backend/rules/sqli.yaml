@@ -1,0 +1,27 @@
+id: java-sqli
+name: SQL Injection
+severity: HIGH
+description: Detects SQL injection via string concatenation (JDBC/JPA/Hibernate). Use PreparedStatement or parameterized queries.
+language: java
+patterns:
+  - "(?i)select.*from.*\\+"
+  - "(?i)update.*set.*\\+"
+  - "(?i)insert.*into.*\\+"
+  - "(?i)delete.*from.*\\+"
+  - "Statement"
+  - "createQuery"
+  - "createNativeQuery"
+sources:
+  - "request\\.getParameter"
+  - "request\\.getHeader"
+  - "@RequestParam"
+  - "@PathVariable"
+  - "@RequestBody"
+sinks:
+  - "executeQuery\\("
+  - "executeUpdate\\("
+  - "execute\\("
+  - "createQuery\\("
+  - "createNativeQuery\\("
+  - "queryForList\\("
+  - "queryForObject\\("

@@ -1,0 +1,14 @@
+id: mybatis-sqli
+name: MyBatis SQL Injection
+severity: HIGH
+description: Detects MyBatis SQL injection via variable substitution (${...}). Use #{...} instead.
+language: xml
+patterns:
+  - "\\$\\{[^}]+\\}"
+sources:
+  - "@RequestParam"
+  - "@PathVariable"
+  - "HttpServletRequest"
+  - "request.getParameter"
+  - "System.in"
+  - "Scanner"

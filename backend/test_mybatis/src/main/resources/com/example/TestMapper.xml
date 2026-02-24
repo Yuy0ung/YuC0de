@@ -1,0 +1,5 @@
+<mapper namespace="com.example.TestMapper">
+    <select id="queryAll">
+        select * from t where name = '${name}'
+    </select>
+</mapper>

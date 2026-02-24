@@ -1,0 +1,25 @@
+id: java-deserialization
+name: Insecure Deserialization
+severity: HIGH
+description: Detects unsafe deserialization which can lead to Remote Code Execution.
+language: java
+patterns:
+  - "readObject\\("
+  - "XMLDecoder"
+  - "Yaml\\.load"
+  - "fromJSON"
+  - "readValue"
+sources:
+  - "request\\.getParameter"
+  - "request\\.getHeader"
+  - "request\\.getInputStream"
+  - "request\\.getReader"
+  - "@RequestParam"
+  - "@PathVariable"
+  - "@RequestBody"
+sinks:
+  - "readObject\\("
+  - "new XMLDecoder\\("
+  - "\\.load\\("
+  - "JSON\\.parseObject\\("
+  - "\\.readValue\\("

@@ -1,0 +1,26 @@
+id: java-xss
+name: Cross-Site Scripting
+severity: MEDIUM
+description: Detects potential XSS via direct response writing. Ensure output is encoded/escaped.
+language: java
+patterns:
+  - "response\\.getWriter\\(\\)\\.write\\("
+  - "response\\.getWriter\\(\\)\\.print\\("
+  - "PrintWriter.*\\.print\\("
+  - "PrintWriter.*\\.write\\("
+sources:
+  - "request\\.getParameter"
+  - "request\\.getHeader"
+  - "request\\.getQueryString"
+  - "@RequestParam"
+  - "@PathVariable"
+  - "@RequestBody"
+sinks:
+  - "response\\.getWriter\\(\\)\\.write\\("
+  - "\\.print\\("
+  - "\\.write\\("
+  - "\\.append\\("
+sanitizers:
+  - "StringEscapeUtils.escapeHtml"
+  - "HtmlUtils.htmlEscape"
+  - "URLEncoder.encode"

@@ -1,0 +1,28 @@
+id: java-ssrf
+name: Server-Side Request Forgery
+severity: HIGH
+description: Detects SSRF via URL connection or HTTP clients. Validate input URLs against an allowlist.
+language: java
+patterns:
+  - "new URL\\(.*\\)\\.openConnection"
+  - "URLConnection"
+  - "HttpURLConnection"
+  - "HttpClient"
+  - "OkHttpClient"
+  - "RestTemplate"
+  - "ImageIO\\.read"
+  - "\\.openConnection\\("
+sources:
+  - "request\\.getParameter"
+  - "request\\.getHeader"
+  - "@RequestParam"
+  - "@PathVariable"
+  - "@RequestBody"
+sinks:
+  - "new URL\\(.*\\)\\.openConnection"
+  - "\\.openConnection\\("
+  - "\\.execute\\("
+  - "\\.newCall\\("
+  - "\\.getForObject\\("
+  - "\\.postForObject\\("
+  - "ImageIO\\.read\\("

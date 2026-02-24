@@ -1,0 +1,22 @@
+id: java-rce
+name: Remote Code Execution
+severity: HIGH
+description: Detects command execution in Java. Avoid using Runtime.exec or ProcessBuilder with user input.
+language: java
+patterns:
+  - "Runtime\\.getRuntime\\(\\)\\.exec\\("
+  - "new ProcessBuilder\\("
+  - "ProcessImpl\\.start\\("
+sources:
+  - "request\\.getParameter"
+  - "request\\.getHeader"
+  - "request\\.getQueryString"
+  - "request\\.getCookies"
+  - "@RequestParam"
+  - "@PathVariable"
+  - "@RequestBody"
+sinks:
+  - "Runtime\\.getRuntime\\(\\)\\.exec\\("
+  - "new ProcessBuilder\\("
+  - "ProcessImpl\\.start\\("
+  - "\\.start\\(\\)"

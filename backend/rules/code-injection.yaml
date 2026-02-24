@@ -1,0 +1,23 @@
+id: java-code-injection
+name: Code/Expression Injection
+severity: HIGH
+description: Detects dynamic code or expression evaluation which can lead to Code Execution.
+language: java
+patterns:
+  - "ScriptEngine"
+  - "GroovyShell"
+  - "ELProcessor"
+  - "SpelExpressionParser"
+  - "Ognl\\.getValue"
+  - "MVEL\\.eval"
+sources:
+  - "request\\.getParameter"
+  - "request\\.getHeader"
+  - "@RequestParam"
+  - "@PathVariable"
+  - "@RequestBody"
+sinks:
+  - "\\.eval\\("
+  - "\\.evaluate\\("
+  - "\\.getValue\\("
+  - "\\.parseExpression\\("
