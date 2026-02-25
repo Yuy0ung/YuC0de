@@ -246,12 +246,83 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 
 				for i, line := range lines {
 					if reSink.MatchString(line) {
+						// Skip comments
+						trimmedLine := strings.TrimSpace(line)
+						if strings.HasPrefix(trimmedLine, "//") || strings.HasPrefix(trimmedLine, "*") || strings.HasPrefix(trimmedLine, "/*") {
+							continue
+						}
+
 						if isExcluded(line) {
 							continue
 						}
 						// Found Sink, now trace back variables
 						vars := extractVariables(line)
 						for _, varName := range vars {
+							// Optimization: For method call sinks like .append(),
+							// we should only trace the ARGUMENTS, not the method call itself or the object.
+							// E.g. response.append("<li>") -> "li" is extracted as var, but it's a string literal part.
+							// Real var should be inside parens.
+
+							// Check if varName is actually an argument to the sink method
+							// This is a heuristic for .append() style sinks
+							if strings.Contains(sink, "append") || strings.Contains(line, ".append(") {
+								// Check if varName is within the parens of append(...)
+								// This is tricky with regex, but we can check if it's "append(...varName...)"
+								// and NOT "varName.append(...)" (unless varName IS the sink object, but usually we track data)
+
+								// Simplified check: if varName is the object calling append (e.g. response), ignore it
+								// We only want to track what is being appended.
+								if strings.Contains(line, varName+".append") {
+									continue
+								}
+
+								// Also check if varName is just a substring of a string literal
+								// e.g. append("<ul>") -> extractVariables finds "ul", but it is inside quotes.
+								// Simple check: is it surrounded by quotes?
+								// This is heuristic and not perfect parser, but reduces noise.
+								// Find the varName in the line
+								idx := strings.Index(line, varName)
+								if idx > 0 && idx < len(line)-1 {
+									// Check if surrounded by quotes
+									// This is very rough, better would be to check if we are inside a string literal context
+									// But for now, let's assume if it's part of "..." it's safe?
+									// Actually, extractVariables implementation might already be too aggressive.
+								}
+
+								// BETTER CHECK: Only trace if varName appears inside append(...)
+								// AND is not part of a string literal.
+								// But without full parser this is hard.
+								// Let's at least check if "append(..." + varName exists or similar?
+
+								// For now, let's rely on the Source check in traceBack.
+								// If "ul" traces back to nothing, it won't report (unless we find a variable named "ul").
+								// The issue is if "ul" is interpreted as a variable.
+								// If "ul" is not defined as a variable in the scope, traceBack should fail quickly.
+								// BUT, legacyTraceBack might be too loose.
+
+								// Let's add a check: Is varName inside quotes in this line?
+								// Count quotes before the varName occurrence
+								// This is expensive but necessary for "<ul>" case
+
+								isInsideQuotes := false
+								quoteCount := 0
+								for k, char := range line {
+									if char == '"' {
+										quoteCount++
+									}
+									if k >= strings.Index(line, varName) {
+										break
+									}
+								}
+								if quoteCount%2 != 0 {
+									isInsideQuotes = true
+								}
+
+								if isInsideQuotes {
+									continue
+								}
+							}
+
 							// Trace back this variable
 							trace, found := traceBack(path, lines, i, varName, rule.Sources, rule.Sanitizers, 0, rootDir)
 							if found {
@@ -340,6 +411,14 @@ func toRelative(path string, rootDir string) string {
 
 // extractVariables finds potential variable names in a line
 func extractVariables(line string) []string {
+	// Strip single line comments
+	if idx := strings.Index(line, "//"); idx != -1 {
+		line = line[:idx]
+	}
+
+	// Strip string literals to avoid matching content inside quotes
+	line = removeStringContent(line)
+
 	keywords := map[string]bool{
 		"new": true, "public": true, "private": true, "protected": true,
 		"class": true, "return": true, "if": true, "else": true, "for": true, "while": true,
@@ -359,6 +438,43 @@ func extractVariables(line string) []string {
 		}
 	}
 	return vars
+}
+
+func removeStringContent(line string) string {
+	var sb strings.Builder
+	inQuote := false
+	escaped := false
+	for _, r := range line {
+		if escaped {
+			if inQuote {
+				sb.WriteRune(' ')
+			} else {
+				sb.WriteRune(r)
+			}
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			if inQuote {
+				sb.WriteRune(' ')
+			} else {
+				sb.WriteRune(r)
+			}
+			continue
+		}
+		if r == '"' {
+			inQuote = !inQuote
+			sb.WriteRune('"')
+			continue
+		}
+		if inQuote {
+			sb.WriteRune(' ')
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
 }
 
 // findMyBatisSource attempts to locate the Java method that corresponds to the MyBatis XML SQL statement
@@ -460,6 +576,12 @@ func traceUsages(methodName string, rootDir string) []Step {
 			lineNum, _ := strconv.Atoi(parts[1])
 			content := strings.Join(parts[2:], ":")
 
+			// Skip comments in usage search
+			trimmedContent := strings.TrimSpace(content)
+			if strings.HasPrefix(trimmedContent, "//") || strings.HasPrefix(trimmedContent, "*") || strings.HasPrefix(trimmedContent, "/*") {
+				continue
+			}
+
 			// Exclude definition itself
 			if strings.Contains(content, "interface ") || strings.Contains(content, "public ") || strings.Contains(content, "private ") {
 				continue
@@ -512,6 +634,12 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 	for i := startIndex - 1; i >= methodInfo.StartLine-1; i-- {
 		line := lines[i]
 
+		// Skip comments
+		trimmedLine := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmedLine, "//") || strings.HasPrefix(trimmedLine, "*") || strings.HasPrefix(trimmedLine, "/*") {
+			continue
+		}
+
 		if !strings.Contains(line, currentVar) {
 			continue
 		}
@@ -521,7 +649,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 				FilePath:    toRelative(path, rootDir),
 				LineNumber:  i + 1,
 				LineContent: strings.TrimSpace(line),
-				Description: "Control Flow: Variable used in IF condition",
+				Description: "Propagation: 条件判断 - 变量用于 IF 条件",
 			})
 		}
 
@@ -534,8 +662,9 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 
 		if isVariableOnLHS(lhs, currentVar) {
 			// Check Source
+			cleanRHS := removeStringContent(rhs)
 			for _, src := range sourcePatterns {
-				if strings.Contains(rhs, src) { // Simplified check
+				if strings.Contains(cleanRHS, src) { // Simplified check
 					steps = append(steps, Step{
 						FilePath:    toRelative(path, rootDir),
 						LineNumber:  i + 1,
@@ -618,7 +747,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 					}
 
 					// Trace Arguments
-					args := extractArguments(rhs, methodName)
+					args := extractArguments(removeStringContent(rhs), methodName)
 					for _, arg := range args {
 						argVars := extractVariables(arg)
 						for _, av := range argVars {
@@ -716,9 +845,10 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 					line := callerLines[k-1]
 					// Simple check if line contains method call
 					// precise check would need tokenization, but this is SAST
-					if strings.Contains(line, methodInfo.Name+"(") || strings.Contains(line, "."+methodInfo.Name+"(") {
+					cleanLine := removeStringContent(line)
+					if strings.Contains(cleanLine, methodInfo.Name+"(") || strings.Contains(cleanLine, "."+methodInfo.Name+"(") {
 						// Extract args
-						args := extractArguments(line, methodInfo.Name)
+						args := extractArguments(cleanLine, methodInfo.Name)
 						if len(args) > paramIdx {
 							argVal := strings.TrimSpace(args[paramIdx])
 							// Recurse trace in caller
@@ -826,6 +956,12 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 	for i := startIndex - 1; i >= limit; i-- {
 		line := lines[i]
 
+		// Skip comments
+		trimmedLine := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmedLine, "//") || strings.HasPrefix(trimmedLine, "*") || strings.HasPrefix(trimmedLine, "/*") {
+			continue
+		}
+
 		// Heuristic: Stop if we hit a method definition boundary
 		// This prevents crossing into previous methods if ProjectIndex failed or limit is too loose
 		if (strings.Contains(line, "public ") || strings.Contains(line, "private ") || strings.Contains(line, "protected ")) &&
@@ -837,16 +973,14 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 			}
 		}
 
-		if !strings.Contains(line, targetVar) {
-			continue
-		}
-		if !strings.Contains(line, targetVar) {
+		if !strings.Contains(removeStringContent(line), targetVar) {
 			continue
 		}
 
 		// 1. Direct Source Check (for parameters or direct usage)
+		cleanLine := removeStringContent(line)
 		for _, src := range sourcePatterns {
-			if strings.Contains(line, src) {
+			if strings.Contains(cleanLine, src) {
 				// Avoid false positives: ensure targetVar is actually in the line (already checked)
 				// and maybe some other heuristics?
 				steps = append(steps, Step{
