@@ -258,6 +258,29 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 						// Found Sink, now trace back variables
 						vars := extractVariables(line)
 						for _, varName := range vars {
+							// Optimization: Ignore variables that are only on the LHS of an assignment
+							// This prevents tracing the result of a sink (e.g. rowsAffected = stmt.executeUpdate(sql))
+							// which can lead to cross-case contamination if the variable is reused.
+							parts := strings.Split(line, "=")
+							if len(parts) >= 2 {
+								lhs := parts[0]
+								if isVariableOnLHS(lhs, varName) {
+									// It is on LHS. Check if it is also on RHS.
+									rhs := strings.Join(parts[1:], "=")
+									rhsVars := extractVariables(rhs)
+									onRHS := false
+									for _, rv := range rhsVars {
+										if rv == varName {
+											onRHS = true
+											break
+										}
+									}
+									if !onRHS {
+										continue
+									}
+								}
+							}
+
 							// Optimization: For method call sinks like .append(),
 							// we should only trace the ARGUMENTS, not the method call itself or the object.
 							// E.g. response.append("<li>") -> "li" is extracted as var, but it's a string literal part.
@@ -800,6 +823,23 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 		paramName := parts[len(parts)-1]
 
 		if paramName == targetVar {
+			// Check if parameter itself is a Source (e.g. @RequestParam)
+			for _, src := range sourcePatterns {
+				if strings.Contains(param, src) {
+					// Found Source!
+					steps = append(steps, Step{
+						FilePath:    toRelative(path, rootDir),
+						LineNumber:  methodInfo.StartLine,
+						LineContent: "Parameter: " + param,
+						Description: "Source: " + src + " (方法参数 " + paramName + ")",
+					})
+					for k := len(intermediateSteps) - 1; k >= 0; k-- {
+						steps = append(steps, intermediateSteps[k])
+					}
+					return steps, true
+				}
+			}
+
 			// Trace Callers using Reverse Call Graph
 			callers := ProjectIndex.CallerMap[methodInfo.Name]
 
@@ -965,8 +1005,8 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 		// Heuristic: Stop if we hit a method definition boundary
 		// This prevents crossing into previous methods if ProjectIndex failed or limit is too loose
 		if (strings.Contains(line, "public ") || strings.Contains(line, "private ") || strings.Contains(line, "protected ")) &&
-			strings.Contains(line, "(") && strings.Contains(line, ")") {
-			// This is likely a method signature.
+			(strings.Contains(line, "(") || strings.Contains(line, " class ") || strings.Contains(line, " interface ")) {
+			// This is likely a method signature or class definition.
 			// We process this line (in case the targetVar is a parameter), but we MUST stop here.
 			if i > limit {
 				limit = i

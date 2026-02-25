@@ -402,10 +402,12 @@ func (p *Parser) parseMethod() *MethodNode {
 	if p.peek().Value != ")" {
 		for {
 			// Parse one parameter
-			// Skip annotations
+			// Capture annotations
+			var annotations string
 			for p.peek().Value == "@" {
-				p.next() // @
-				p.next() // Annotation Name
+				p.next()                  // @
+				annName := p.next().Value // Annotation Name
+				annotations += "@" + annName + " "
 				if p.peek().Value == "(" {
 					p.next()
 					p.skipBalanced("(", ")")
@@ -439,7 +441,7 @@ func (p *Parser) parseMethod() *MethodNode {
 			// Name
 			nameStr := p.next().Value
 
-			parameters = append(parameters, typeStr+" "+nameStr)
+			parameters = append(parameters, annotations+typeStr+" "+nameStr)
 
 			if p.peek().Value == "," {
 				p.next()
