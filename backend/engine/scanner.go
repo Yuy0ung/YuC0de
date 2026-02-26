@@ -853,7 +853,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 			// Check Source
 			cleanRHS := removeStringContent(rhs)
 			for _, src := range sourcePatterns {
-				if strings.Contains(cleanRHS, src) { // Simplified check
+				if matchPattern(src, cleanRHS) { // Use regex match for Source patterns
 					steps = append(steps, Step{
 						FilePath:    toRelative(path, rootDir),
 						LineNumber:  i + 1,
@@ -993,7 +993,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 			// Check if parameter itself is a Source (e.g. @RequestParam)
 			// fmt.Printf("DEBUG: Found parameter match %s in %s\n", paramName, methodInfo.Name)
 			for _, src := range sourcePatterns {
-				if strings.Contains(param, src) {
+				if matchPattern(src, param) {
 					// Found Source!
 					steps = append(steps, Step{
 						FilePath:    toRelative(path, rootDir),
@@ -1087,6 +1087,11 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 			}
 
 			// If no caller trace found, report as entry point
+			// Fix: Check if parameter type is safe/output-related (e.g. HttpServletResponse)
+			if isSafeParameterType(param) {
+				return nil, false
+			}
+
 			return []Step{{
 				FilePath:    toRelative(path, rootDir),
 				LineNumber:  methodInfo.StartLine,
@@ -1097,6 +1102,29 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 	}
 
 	return nil, false
+}
+
+func isSafeParameterType(paramDecl string) bool {
+	safeTypes := []string{
+		"HttpServletResponse",
+		"HttpServletRequest",
+		"HttpSession",
+		"Model",
+		"ModelMap",
+		"BindingResult",
+		"Errors",
+	}
+	for _, t := range safeTypes {
+		if strings.Contains(paramDecl, t) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchPattern(pattern, text string) bool {
+	matched, _ := regexp.MatchString(pattern, text)
+	return matched
 }
 
 // extractArguments extracts arguments from a method call string like "foo(a, b(c), d)"
@@ -1340,7 +1368,7 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 		// 1. Direct Source Check (for parameters or direct usage)
 		cleanLine := removeStringContent(line)
 		for _, src := range sourcePatterns {
-			if strings.Contains(cleanLine, src) {
+			if matchPattern(src, cleanLine) {
 				// Avoid false positives: ensure targetVar is actually in the line (already checked)
 				// and maybe some other heuristics?
 				steps = append(steps, Step{
