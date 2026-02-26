@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,6 +145,7 @@ func startScan(c *gin.Context) {
 
 		if t.SourceType == "git" {
 			// git clone
+			fmt.Printf("Cloning %s into %s\n", t.Target, t.ScanPath)
 			cmd := exec.Command("git", "clone", t.Target, t.ScanPath)
 			// Since ScanPath is an existing empty dir, git clone <url> <dir> works
 			// Note: git clone might fail if dir is not empty, but MkdirTemp guarantees it is.
@@ -154,6 +156,7 @@ func startScan(c *gin.Context) {
 
 			if err := cmd.Run(); err != nil {
 				db.Model(&t).Update("Status", "FAILED")
+				fmt.Printf("git clone failed: %v\n", err)
 				// Cleanup
 				os.RemoveAll(t.ScanPath)
 				return

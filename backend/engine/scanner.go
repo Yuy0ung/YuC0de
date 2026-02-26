@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -76,13 +77,16 @@ func NewEngine(rulesDir string) (*Engine, error) {
 				continue
 			}
 			rules = append(rules, rule)
+			// fmt.Printf("Loaded rule: %s\n", rule.ID)
 		}
 	}
+	// fmt.Printf("Total rules loaded: %d\n", len(rules))
 	return &Engine{Rules: rules, Index: ProjectIndex}, nil
 }
 
 // ScanFile scans a single file
 func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) {
+	// fmt.Printf("Scanning file: %s\n", path)
 	contentBytes, err := ioutil.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -368,9 +372,79 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 								}
 							}
 
+							// Check variable type for generic sinks like "execute"
+							// If the object calling "execute" is a known safe type (e.g. HttpClient), ignore it.
+							// BUT ONLY if we are checking for SQL Injection!
+							// For SSRF, HttpClient.execute IS a sink.
+							if strings.Contains(sink, "execute") {
+								// Find the object calling execute
+								// e.g. client.execute(get) -> client
+								// e.g. stmt.execute(sql) -> stmt
+								objName := findCallerObject(line, "execute")
+
+								// DEBUG PRINT
+								// fmt.Printf("DEBUG: Line=%s, Rule=%s, ObjName=%s\n", line, rule.ID, objName)
+
+								if objName != "" {
+									objType := resolveVariableType(lines, i, objName)
+
+									// DEBUG PRINT
+									// fmt.Printf("DEBUG: Resolved Type for %s: %s\n", objName, objType)
+
+									if objType != "" {
+										// If it's SQLi rule, check if it's safe type (like HttpClient)
+										if strings.Contains(strings.ToLower(rule.ID), "sqli") || strings.Contains(strings.ToLower(rule.ID), "sql-injection") {
+											if isSafeExecuteType(objType) {
+												continue
+											}
+										}
+
+										// If it's SSRF rule, we MIGHT want to filter OUT SQL types?
+										// e.g. stmt.execute() is NOT SSRF.
+										// But let's stick to the current issue: SSRF missing HttpClient.
+										// Since we are NOT skipping for SSRF above, it should fall through.
+									}
+								} else {
+									// If we cannot find caller object, we might want to be conservative.
+									// But for "Request.Get().execute()", findCallerObject SHOULD return "Request".
+								}
+							}
+
+							// For chained method calls like Request.Get(url).execute(),
+							// The "url" is not an argument to "execute", but to "Get".
+							// extractVariables finds "url".
+							// But is "url" considered a variable for "execute"?
+							// extractVariables just dumps all variables.
+							// Then traceBack is called on each.
+							// traceBack checks if the variable leads to a source.
+
+							// IF varName is "Request", traceBack("Request") -> fails (it's a class).
+							// IF varName is "url", traceBack("url") -> succeeds (it's a param).
+
+							// So why is it failing?
+							// Maybe "url" is filtered out by some optimization?
+
+							// Line 312: check if varName is argument to sink method (append heuristic).
+							// We might need to RELAX this for chained calls or specifically for "execute" in SSRF?
+							// Or maybe the loop continues and hits "url"?
+
+							// Wait, if line 312 logic applies to "execute", it might filter "url" out because "url" is NOT inside execute(...)
+							// But line 312 explicitly checks strings.Contains(sink, "append").
+							// So it shouldn't affect "execute".
+
+							// Let's look at traceBack for "url" in line:
+							// Request.Get(String.valueOf(url)).execute()
+							// traceBack("url") ->
+							// 1. Check if "url" is source. Yes, @RequestParam.
+							// Return found=true.
+
+							// So it SHOULD be found.
+
 							// Trace back this variable
+							// fmt.Printf("Tracing var: %s for sink: %s in rule: %s\n", varName, sink, rule.ID)
 							trace, found := traceBack(path, lines, i, varName, rule.Sources, rule.Sanitizers, 0, rootDir)
 							if found {
+								// fmt.Printf("FOUND Trace for %s!\n", varName)
 								// Add Sink step
 								trace = append(trace, Step{
 									FilePath:    relPath,
@@ -1033,6 +1107,157 @@ func extractArguments(line string, methodName string) []string {
 		}
 	}
 	return args
+}
+
+// findCallerObject extracts the object calling the method
+// e.g. "client.execute(get)" -> "client"
+// e.g. "stmt.execute(sql)" -> "stmt"
+// e.g. "Request.Get(url).execute()" -> "Request"
+func findCallerObject(line string, methodName string) string {
+	// 1. Simple regex to find "object.methodName("
+	// Matches: client.execute(
+	re := regexp.MustCompile(`([\w]+)\.` + regexp.QuoteMeta(methodName) + `\(`)
+	matches := re.FindStringSubmatch(line)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+
+	// 2. Handle chained calls: "Request.Get(url).execute()"
+	// Look for pattern: ...).methodName(
+	chainRe := regexp.MustCompile(`\)\.` + regexp.QuoteMeta(methodName) + `\(`)
+	if chainRe.MatchString(line) {
+		// This is likely a chain.
+		// Try to find the start of the chain.
+		// This is complex to do perfectly with regex, but we can try to extract the first word in the statement.
+		// Assuming the statement is like "Type var = ChainStart.method()...;" or "ChainStart.method()...;"
+
+		// Extract the part before .execute(
+		idx := strings.Index(line, "."+methodName+"(")
+		if idx != -1 {
+			preceeding := strings.TrimSpace(line[:idx])
+			// If it contains "=", take the part after "="
+			if eqIdx := strings.LastIndex(preceeding, "="); eqIdx != -1 {
+				preceeding = strings.TrimSpace(preceeding[eqIdx+1:])
+			}
+
+			// Now preceeding is likely "Request.Get(String.valueOf(url))"
+			// Extract the first identifier
+			firstWordRe := regexp.MustCompile(`^([\w]+)`)
+			firstMatches := firstWordRe.FindStringSubmatch(preceeding)
+			if len(firstMatches) > 1 {
+				return firstMatches[1] // Returns "Request"
+			}
+		}
+	}
+
+	return ""
+}
+
+// resolveVariableType attempts to find the type of a variable by scanning backwards
+func resolveVariableType(lines []string, currentIndex int, varName string) string {
+	// If varName starts with uppercase, it might be a class name (static call)
+	// e.g. "Request" in "Request.Get(...)"
+	if len(varName) > 0 && unicode.IsUpper(rune(varName[0])) {
+		return varName
+	}
+
+	// Scan backwards from currentIndex
+	// Look for:
+	// 1. Type varName = ...
+	// 2. Type varName;
+	// 3. varName = new Type(...) -> Infer from RHS
+
+	// Limit scan to 50 lines or method boundary
+	limit := currentIndex - 50
+	if limit < 0 {
+		limit = 0
+	}
+
+	for i := currentIndex - 1; i >= limit; i-- {
+		line := strings.TrimSpace(lines[i])
+		// Skip comments
+		if strings.HasPrefix(line, "//") || strings.HasPrefix(line, "*") || strings.HasPrefix(line, "/*") {
+			continue
+		}
+
+		// Check for definition: Type varName ...
+		// Regex: \b(\w+)\s+\bvarName\b
+		// This is tricky because "Type" can be "List<String>" or "Map<K,V>"
+		// Simplified regex for standard Java types: \b([A-Za-z0-9_<>]+)\s+varName\b
+
+		// Case 1: Type varName = ...
+		if strings.Contains(line, " "+varName+" =") || strings.Contains(line, " "+varName+";") || strings.HasPrefix(line, varName+" =") {
+			// Try to extract type
+			// Split by varName
+			parts := strings.Split(line, varName)
+			if len(parts) > 0 {
+				prefix := strings.TrimSpace(parts[0])
+				// The last word in prefix should be the type
+				fields := strings.Fields(prefix)
+				if len(fields) > 0 {
+					possibleType := fields[len(fields)-1]
+					// Validate if it looks like a type (not a keyword like "return", "new")
+					if isType(possibleType) {
+						return possibleType
+					}
+				}
+			}
+		}
+
+		// Case 3: varName = new Type(...)
+		// If we missed the declaration or it's a reassignment
+		if strings.Contains(line, varName) && strings.Contains(line, "=") && strings.Contains(line, "new ") {
+			// Check if varName is on LHS
+			eqParts := strings.Split(line, "=")
+			if len(eqParts) >= 2 {
+				lhs := strings.TrimSpace(eqParts[0])
+				rhs := strings.TrimSpace(eqParts[1])
+				// lhs might be "Type varName" or just "varName"
+				if strings.HasSuffix(lhs, varName) {
+					// Extract Type from "new Type(...)"
+					newIdx := strings.Index(rhs, "new ")
+					if newIdx != -1 {
+						rest := rhs[newIdx+4:]
+						// Type is until "(" or "<" (if we want raw type)
+						// Actually we want full type including generics if possible, but raw type is safer for matching
+						endIdx := strings.IndexAny(rest, "(<")
+						if endIdx != -1 {
+							return strings.TrimSpace(rest[:endIdx])
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func isType(s string) bool {
+	keywords := map[string]bool{
+		"return": true, "public": true, "private": true, "protected": true,
+		"static": true, "final": true, "volatile": true, "synchronized": true,
+		"else": true, "try": true, "catch": true, "finally": true,
+		"throw": true, "throws": true, "import": true, "package": true,
+		"new": true,
+	}
+	return !keywords[s]
+}
+
+func isSafeExecuteType(typeName string) bool {
+	// Types that have .execute() but are NOT SQL injection sinks
+	safeTypes := []string{
+		"HttpClient", "CloseableHttpClient", "DefaultHttpClient", "OkHttpClient",
+		"Client", "RestClient", "WebClient",
+		"Task", "Job", "Service", "Executor", "ExecutorService", "ThreadPoolExecutor",
+		"Call",    // OkHttp Call
+		"Request", // Apache Fluent Request
+	}
+	for _, safe := range safeTypes {
+		if strings.Contains(typeName, safe) {
+			return true
+		}
+	}
+	return false
 }
 
 func legacyTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string) ([]Step, bool) {

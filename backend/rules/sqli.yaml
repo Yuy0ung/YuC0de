@@ -18,6 +18,7 @@ sources:
   - "@PathVariable"
   - "@RequestBody"
 sinks:
+  - "query\\("
   - "executeQuery\\("
   - "executeUpdate\\("
   - "execute\\("
