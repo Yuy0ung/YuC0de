@@ -255,6 +255,28 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 						if isExcluded(line) {
 							continue
 						}
+
+						// Heuristic: Avoid matching method definitions if the sink pattern matches the method name
+						// e.g. "public void execute(...)" should not match sink "execute("
+						trimmed := strings.TrimSpace(line)
+						if strings.HasPrefix(trimmed, "public ") || strings.HasPrefix(trimmed, "protected ") || strings.HasPrefix(trimmed, "private ") {
+							loc := reSink.FindStringIndex(line)
+							if loc != nil {
+								start := loc[0]
+								prefix := line[:start]
+								// If prefix does not contain indicators of a method call or statement
+								// (e.g. "=", "return ", "new ", "(", ".")
+								// Then it is likely a method definition.
+								if !strings.Contains(prefix, "=") &&
+									!strings.Contains(prefix, "return ") &&
+									!strings.Contains(prefix, "new ") &&
+									!strings.Contains(prefix, "(") &&
+									!strings.Contains(prefix, ".") {
+									continue
+								}
+							}
+						}
+
 						// Found Sink, now trace back variables
 						vars := extractVariables(line)
 						for _, varName := range vars {
@@ -551,23 +573,64 @@ func findMyBatisSource(xmlPath string, xmlLines []string, lineIdx int, rootDir s
 				}
 
 				// Fallback: grep
-				cmd := exec.Command("grep", "-rInw", methodName, rootDir)
+				// Restrict to .java files to avoid FPs (e.g. HTML files)
+				cmd := exec.Command("grep", "-rInw", "--include=*.java", methodName, rootDir)
 				out, err := cmd.Output()
 				if err == nil {
 					lines := strings.Split(string(out), "\n")
 					for _, l := range lines {
-						if strings.Contains(l, "interface ") && strings.Contains(l, methodName) {
-							parts := strings.Split(l, ":")
-							if len(parts) >= 2 {
-								fPath := parts[0]
-								lineNum, _ := strconv.Atoi(parts[1])
-								return &Step{
-									FilePath:    toRelative(fPath, rootDir),
-									LineNumber:  lineNum,
-									LineContent: strings.TrimSpace(strings.Join(parts[2:], ":")),
-									Description: "Propagation: Mapper 接口定义",
-								}, methodName
+						if l == "" {
+							continue
+						}
+						// Use SplitN to handle colons in content
+						parts := strings.SplitN(l, ":", 3)
+						if len(parts) < 3 {
+							continue
+						}
+						fPath := parts[0]
+						lineNum, _ := strconv.Atoi(parts[1])
+						content := parts[2]
+
+						// 1. Ensure it's a Java file (double check)
+						if !strings.HasSuffix(fPath, ".java") {
+							continue
+						}
+
+						// 2. If interfaceName is known, verify file name
+						if interfaceName != "" {
+							parts := strings.Split(interfaceName, ".")
+							className := parts[len(parts)-1]
+							if !strings.HasSuffix(fPath, className+".java") {
+								continue
 							}
+						}
+
+						// 3. Check for interface definition or method signature
+						// If we found the specific file (via interfaceName), we are more confident.
+						// Otherwise, we require "interface " keyword to be safe, but this might miss method defs in multi-line interfaces.
+
+						isMatch := false
+						if interfaceName != "" && strings.HasSuffix(fPath, ".java") {
+							// We found the correct file, so this method occurrence is likely the definition.
+							isMatch = true
+						} else {
+							// Fallback: require "interface " keyword on the same line (legacy behavior but restricted to .java)
+							// Or check if it looks like a method definition
+							if strings.Contains(content, "interface ") {
+								isMatch = true
+							} else if (strings.Contains(content, "public ") || strings.Contains(content, "void ") || strings.Contains(content, "Result ") || strings.Contains(content, "List<")) &&
+								!strings.Contains(content, "new ") && !strings.Contains(content, ".") && strings.Contains(content, "(") {
+								isMatch = true
+							}
+						}
+
+						if isMatch {
+							return &Step{
+								FilePath:    toRelative(fPath, rootDir),
+								LineNumber:  lineNum,
+								LineContent: strings.TrimSpace(content),
+								Description: "Propagation: Mapper 接口定义",
+							}, methodName
 						}
 					}
 				}

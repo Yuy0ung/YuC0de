@@ -2,7 +2,7 @@
   <a-layout style="min-height: 100vh">
     <a-layout-header>
       <div class="logo" style="float: left; color: white; font-size: 20px; font-weight: bold; margin-right: 20px;">
-        YY-SAST
+        YuC0de
       </div>
       <a-menu theme="dark" mode="horizontal" :style="{ lineHeight: '64px' }">
         <a-menu-item key="1">
@@ -19,7 +19,7 @@
       </div>
     </a-layout-content>
     <a-layout-footer style="text-align: center">
-      YY-SAST ©2026 Created by Yuy0ung  
+      YuC0de ©2026 Created by Yuy0ung  
     </a-layout-footer>
   </a-layout>
 </template>
