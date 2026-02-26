@@ -1,5 +1,5 @@
 id: mybatis-sqli
-name: MyBatis SQL Injection
+name: MyBatis SQL注入
 severity: HIGH
 description: Detects MyBatis SQL injection via variable substitution (${...}). Use #{...} instead.
 language: xml

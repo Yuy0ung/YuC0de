@@ -1,5 +1,5 @@
 id: java-xxe
-name: XML External Entity (XXE)
+name: XML外部实体注入(XXE)
 severity: HIGH
 description: Detects XML parsing without disabling external entities.
 language: java

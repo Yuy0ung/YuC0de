@@ -1,5 +1,5 @@
 id: java-sqli
-name: SQL Injection
+name: SQL注入
 severity: HIGH
 description: Detects SQL injection via string concatenation (JDBC/JPA/Hibernate). Use PreparedStatement or parameterized queries.
 language: java

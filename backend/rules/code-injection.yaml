@@ -1,5 +1,5 @@
 id: java-code-injection
-name: Code/Expression Injection
+name: 代码/表达式注入
 severity: HIGH
 description: Detects dynamic code or expression evaluation which can lead to Code Execution.
 language: java

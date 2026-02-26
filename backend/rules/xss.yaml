@@ -1,5 +1,5 @@
 id: java-xss
-name: Cross-Site Scripting
+name: 跨站脚本攻击(XSS)
 severity: MEDIUM
 description: Detects potential XSS via direct response writing. Ensure output is encoded/escaped.
 language: java

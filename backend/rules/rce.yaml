@@ -1,5 +1,5 @@
 id: java-rce
-name: Remote Code Execution
+name: 远程代码/命令执行(RCE)
 severity: HIGH
 description: Detects command execution in Java. Avoid using Runtime.exec or ProcessBuilder with user input.
 language: java

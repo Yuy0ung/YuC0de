@@ -1,5 +1,5 @@
 id: java-ssrf
-name: Server-Side Request Forgery
+name: 服务器端请求伪造(SSRF)
 severity: HIGH
 description: Detects SSRF via URL connection or HTTP clients. Validate input URLs against an allowlist.
 language: java

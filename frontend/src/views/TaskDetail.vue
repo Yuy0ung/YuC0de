@@ -6,25 +6,35 @@
       </div>
       <div style="flex: 1; overflow-y: auto;">
         <a-spin :spinning="loading">
-          <a-list item-layout="horizontal" :data-source="vulns">
-            <template #renderItem="{ item }">
-              <a-list-item @click="selectVuln(item)" style="cursor: pointer; padding: 12px 16px;" :class="{ 'selected-item': selectedVuln && selectedVuln.id === item.id }">
-                <a-list-item-meta>
-                  <template #title>
-                    <div style="display: flex; align-items: center; justify-content: space-between;">
-                      <span style="font-weight: 500;">{{ item.rule_name }}</span>
-                      <a-tag :color="item.severity === 'HIGH' ? 'red' : 'orange'" style="margin-right: 0;">{{ item.severity }}</a-tag>
-                    </div>
-                  </template>
-                  <template #description>
-                    <div style="font-size: 12px; color: #888; margin-top: 4px; word-break: break-all;">
-                      {{ item.file_path }}:{{ item.line_number }}
-                    </div>
-                  </template>
-                </a-list-item-meta>
-              </a-list-item>
-            </template>
-          </a-list>
+          <a-collapse :bordered="false" style="background: transparent;">
+            <a-collapse-panel v-for="group in groupedVulns" :key="group.ruleName" style="background: #fff; margin-bottom: 0px; border-bottom: 1px solid #f0f0f0;">
+              <template #header>
+                <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
+                  <span style="font-weight: 500;">{{ group.ruleName }}</span>
+                  <div style="display: flex; align-items: center;">
+                    <a-tag :color="group.severity === 'HIGH' ? 'red' : group.severity === 'MEDIUM' ? 'orange' : 'green'" style="margin-right: 8px;">{{ group.severity }}</a-tag>
+                    <span style="color: #999; font-size: 12px;">{{ group.count }}个</span>
+                  </div>
+                </div>
+              </template>
+              <a-list item-layout="horizontal" :data-source="group.list" :split="false">
+                <template #renderItem="{ item }">
+                  <a-list-item @click="selectVuln(item)" style="cursor: pointer; padding: 6px 16px; border-bottom: 1px solid #e8e8e8;" :class="{ 'selected-item': selectedVuln && selectedVuln.id === item.id }">
+                    <a-list-item-meta>
+                      <template #title>
+                        <div style="font-size: 12px; color: #888; word-break: break-all; font-family: monospace;">
+                          {{ item.file_path }}:{{ item.line_number }}
+                        </div>
+                      </template>
+                    </a-list-item-meta>
+                  </a-list-item>
+                </template>
+              </a-list>
+            </a-collapse-panel>
+          </a-collapse>
+          <div v-if="!loading && groupedVulns.length === 0" style="padding: 16px; text-align: center; color: #999;">
+            No vulnerabilities found
+          </div>
         </a-spin>
       </div>
     </div>
@@ -97,7 +107,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, nextTick } from 'vue';
+import { ref, computed, onMounted, watch, nextTick } from 'vue';
 import { useRoute } from 'vue-router';
 import axios from 'axios';
 import { message } from 'ant-design-vue';
@@ -113,6 +123,27 @@ hljs.registerLanguage('javascript', javascript);
 
 const route = useRoute();
 const vulns = ref([]);
+const groupedVulns = computed(() => {
+  const groups = {};
+  if (!vulns.value) return [];
+  vulns.value.forEach(v => {
+    if (!groups[v.rule_name]) {
+      groups[v.rule_name] = {
+        ruleName: v.rule_name,
+        severity: v.severity,
+        count: 0,
+        list: []
+      };
+    }
+    groups[v.rule_name].list.push(v);
+    groups[v.rule_name].count++;
+  });
+  // Sort by severity (HIGH first)
+  return Object.values(groups).sort((a, b) => {
+    const sevOrder = { 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1 };
+    return (sevOrder[b.severity] || 0) - (sevOrder[a.severity] || 0);
+  });
+});
 const selectedVuln = ref(null);
 const codeContainer = ref(null);
 const highlightedCode = ref('');
