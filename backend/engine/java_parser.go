@@ -49,8 +49,11 @@ func ParseJavaFile(path string) (*JavaFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	content := string(contentBytes)
+	return ParseJavaSource(string(contentBytes), path)
+}
 
+// ParseJavaSource parses Java source code string
+func ParseJavaSource(content string, path string) (*JavaFile, error) {
 	file := &JavaFile{
 		Path: path,
 	}
@@ -245,6 +248,7 @@ func (p *Parser) parseClass() {
 		p.next() // @
 		p.next() // Name
 		if p.peek().Value == "(" {
+			p.next()
 			p.skipBalanced("(", ")")
 		}
 	}
@@ -337,8 +341,8 @@ func (p *Parser) parseClassBody(classNode *ClassNode) {
 
 func (p *Parser) isMethodStart() bool {
 	// Look ahead for ( ... ) {
-	// Simple check: within next 10 tokens do we see '('
-	limit := 10
+	// Simple check: within next 50 tokens do we see '('
+	limit := 50
 	for i := 0; i < limit && p.pos+i < len(p.tokens); i++ {
 		t := p.tokens[p.pos+i]
 		if t.Value == "(" {
@@ -505,8 +509,14 @@ func (p *Parser) extractCalls(start, end int) []string {
 		if i+1 < end && p.tokens[i+1].Value == "(" {
 			if p.tokens[i].Type == TOKEN_IDENTIFIER {
 				// Exclude keywords like if, for, while
-				if !isKeyword(p.tokens[i].Value) {
-					calls = append(calls, p.tokens[i].Value)
+				val := p.tokens[i].Value
+				if !isKeyword(val) {
+					// Handle qualified names like obj.method()
+					if strings.Contains(val, ".") {
+						parts := strings.Split(val, ".")
+						val = parts[len(parts)-1]
+					}
+					calls = append(calls, val)
 				}
 			}
 		}

@@ -180,7 +180,7 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 													sources = []string{"@RequestParam", "@PathVariable", "HttpServletRequest", "System.in", "Scanner"}
 												}
 
-												trace, found := traceBack(absUsagePath, usageLines, usage.LineNumber-1, arg, sources, rule.Sanitizers, 0, rootDir)
+												trace, found := traceBack(absUsagePath, usageLines, usage.LineNumber-1, arg, sources, rule.Sanitizers, 0, rootDir, nil)
 												fmt.Printf("TraceBack for %s in %s line %d: found=%v steps=%d\n", arg, absUsagePath, usage.LineNumber, found, len(trace))
 												if found {
 													tracedBackSteps = trace
@@ -442,7 +442,7 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 
 							// Trace back this variable
 							// fmt.Printf("Tracing var: %s for sink: %s in rule: %s\n", varName, sink, rule.ID)
-							trace, found := traceBack(path, lines, i, varName, rule.Sources, rule.Sanitizers, 0, rootDir)
+							trace, found := traceBack(path, lines, i, varName, rule.Sources, rule.Sanitizers, 0, rootDir, nil)
 							if found {
 								// fmt.Printf("FOUND Trace for %s!\n", varName)
 								// Add Sink step
@@ -762,9 +762,38 @@ func traceUsages(methodName string, rootDir string) []Step {
 }
 
 // traceBack tries graph-based analysis first, then falls back to legacy regex
-func traceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string) ([]Step, bool) {
+func traceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
+	// Limit recursion depth
+	if depth > 10 {
+		return nil, false
+	}
+
+	// Avoid cycles
+	stateKey := fmt.Sprintf("%s:%d:%s", path, startIndex, targetVar)
+	if visited[stateKey] {
+		return nil, false
+	}
+	// Copy visited map to avoid side effects across branches?
+	// Actually, for cycle detection in a single path, we need to add to visited.
+	// Go maps are references. If we modify it, it affects caller.
+	// But we want to prevent *this specific path* from looping.
+	// So we should add to visited before recursing, and maybe remove after?
+	// Or just keep it for the whole traversal if we want to avoid re-visiting same state.
+	// For infinite loop prevention, we just need to know if we are already visiting this state in the current stack.
+	// So we should clone the map or remove the key after returning.
+	// But simply passing a map that accumulates visited states is safer for general loop detection.
+	// Let's create a new map if nil.
+	if visited == nil {
+		visited = make(map[string]bool)
+	}
+	visited[stateKey] = true
+	defer delete(visited, stateKey)
+	// defer delete(visited, stateKey) // Optional: if we want to allow visiting same state from different paths.
+
+	// fmt.Printf("DEBUG: traceBack depth=%d file=%s target=%s\n", depth, path, targetVar)
+
 	// Try Graph Analysis
-	steps, found := graphTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, depth, rootDir)
+	steps, found := graphTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, depth, rootDir, visited)
 	if found {
 		return steps, true
 	}
@@ -773,7 +802,7 @@ func traceBack(path string, lines []string, startIndex int, targetVar string, so
 }
 
 // graphTraceBack searches backwards using the Symbol Table (Graph-based)
-func graphTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string) ([]Step, bool) {
+func graphTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
 	if depth > 20 {
 		return nil, false
 	}
@@ -868,7 +897,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 							if strings.Contains(calleeLines[k], "return ") {
 								retVars := extractVariables(strings.ReplaceAll(calleeLines[k], "return", ""))
 								for _, rv := range retVars {
-									calleeSteps, found := traceBack(calleeInfo.FilePath, calleeLines, k+1, rv, sourcePatterns, sanitizerPatterns, depth+1, rootDir)
+									calleeSteps, found := traceBack(calleeInfo.FilePath, calleeLines, k+1, rv, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
 									if found {
 										calleeSteps = append(calleeSteps, Step{
 											FilePath:    toRelative(path, rootDir),
@@ -892,7 +921,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 					// 2. The arguments passed to the method
 
 					// Trace Object
-					objSteps, foundObj := traceBack(path, lines, i, objName, sourcePatterns, sanitizerPatterns, depth+1, rootDir)
+					objSteps, foundObj := traceBack(path, lines, i, objName, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
 					if foundObj {
 						objSteps = append(objSteps, Step{
 							FilePath:    toRelative(path, rootDir),
@@ -911,7 +940,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 					for _, arg := range args {
 						argVars := extractVariables(arg)
 						for _, av := range argVars {
-							argSteps, foundArg := traceBack(path, lines, i, av, sourcePatterns, sanitizerPatterns, depth+1, rootDir)
+							argSteps, foundArg := traceBack(path, lines, i, av, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
 							if foundArg {
 								argSteps = append(argSteps, Step{
 									FilePath:    toRelative(path, rootDir),
@@ -932,7 +961,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 			// Recurse on RHS variable
 			rhsVars := extractVariables(rhs)
 			for _, v := range rhsVars {
-				subSteps, found := traceBack(path, lines, i, v, sourcePatterns, sanitizerPatterns, depth+1, rootDir)
+				subSteps, found := traceBack(path, lines, i, v, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
 				if found {
 					subSteps = append(subSteps, Step{
 						FilePath:    toRelative(path, rootDir),
@@ -959,8 +988,10 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 		}
 		paramName := parts[len(parts)-1]
 
-		if paramName == targetVar {
+		// Check if targetVar is the parameter itself or a property/method of the parameter
+		if paramName == targetVar || strings.HasPrefix(targetVar, paramName+".") {
 			// Check if parameter itself is a Source (e.g. @RequestParam)
+			// fmt.Printf("DEBUG: Found parameter match %s in %s\n", paramName, methodInfo.Name)
 			for _, src := range sourcePatterns {
 				if strings.Contains(param, src) {
 					// Found Source!
@@ -968,7 +999,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 						FilePath:    toRelative(path, rootDir),
 						LineNumber:  methodInfo.StartLine,
 						LineContent: "Parameter: " + param,
-						Description: "Source: " + src + " (方法参数 " + paramName + ")",
+						Description: "Source: 污点源 " + src + " (方法参数 " + paramName + ")",
 					})
 					for k := len(intermediateSteps) - 1; k >= 0; k-- {
 						steps = append(steps, intermediateSteps[k])
@@ -979,6 +1010,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 
 			// Trace Callers using Reverse Call Graph
 			callers := ProjectIndex.CallerMap[methodInfo.Name]
+			// fmt.Printf("DEBUG: Looking for callers of %s. Found %d callers.\n", methodInfo.Name, len(callers))
 
 			// Limit number of callers to trace to avoid explosion
 			maxCallers := 5
@@ -1029,14 +1061,14 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 						if len(args) > paramIdx {
 							argVal := strings.TrimSpace(args[paramIdx])
 							// Recurse trace in caller
-							callerSteps, found := traceBack(callerInfo.FilePath, callerLines, k, argVal, sourcePatterns, sanitizerPatterns, depth+1, rootDir)
+							callerSteps, found := traceBack(callerInfo.FilePath, callerLines, k, argVal, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
 							if found {
 								// Add Propagation step for the Method Call in the caller
 								callerSteps = append(callerSteps, Step{
 									FilePath:    toRelative(callerInfo.FilePath, rootDir),
 									LineNumber:  k,
 									LineContent: strings.TrimSpace(line),
-									Description: "Propagation: 方法调用 " + methodInfo.Name,
+									Description: "Propagation: 传播 方法调用 " + methodInfo.Name,
 								})
 
 								// Add Propagation step for the Parameter Entry in the callee
@@ -1044,7 +1076,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 									FilePath:    toRelative(path, rootDir),
 									LineNumber:  methodInfo.StartLine,
 									LineContent: "public " + methodInfo.ReturnType + " " + methodInfo.Name + "(...)",
-									Description: "Propagation: 跨方法追踪 - 参数 " + paramName + " 传递自 " + cClass + "." + cMethod,
+									Description: "Propagation: 传播 跨方法追踪 - 参数 " + paramName + " 传递自 " + cClass + "." + cMethod,
 								})
 								// Append intermediate steps if any (from current context) - but we don't have them here
 								return callerSteps, true

@@ -128,6 +128,15 @@ func (st *SymbolTable) indexFile(path string, mu *sync.Mutex) {
 			for _, calledMethod := range method.Calls {
 				callerID := fullClassName + ":" + method.Name
 				st.CallerMap[calledMethod] = append(st.CallerMap[calledMethod], callerID)
+
+				// Also index by simple name if it's a qualified call (e.g. obj.method)
+				// This helps when we don't know the variable type in the scanner
+				if strings.Contains(calledMethod, ".") {
+					parts := strings.Split(calledMethod, ".")
+					simpleName := parts[len(parts)-1]
+					// Avoid duplicates if possible, but slice append is okay for now
+					st.CallerMap[simpleName] = append(st.CallerMap[simpleName], callerID)
+				}
 			}
 		}
 	}
