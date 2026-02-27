@@ -17,6 +17,5 @@ sources:
   - "@RequestBody"
 sinks:
   - "Runtime\\.getRuntime\\(\\)\\.exec\\("
-  - "new ProcessBuilder\\("
   - "ProcessImpl\\.start\\("
   - "\\.start\\(\\)"

@@ -470,6 +470,7 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 				}
 			}
 		}
+
 	}
 
 	return vulns, nil
@@ -842,6 +843,37 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 			})
 		}
 
+		// Check for Collection modification methods: var.add(arg), var.append(arg), etc.
+		if strings.Contains(line, currentVar+".") {
+			// Patterns: .add(, .addAll(, .put(, .append(, .insert(
+			methods := []string{"add", "addAll", "put", "append", "insert"}
+			for _, m := range methods {
+				if strings.Contains(line, currentVar+"."+m+"(") {
+					// Extract arguments
+					args := extractArguments(removeStringContent(line), m)
+					for _, arg := range args {
+						argVars := extractVariables(arg)
+						for _, av := range argVars {
+							// Trace back the argument
+							argSteps, foundArg := traceBack(path, lines, i, av, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
+							if foundArg {
+								argSteps = append(argSteps, Step{
+									FilePath:    toRelative(path, rootDir),
+									LineNumber:  i + 1,
+									LineContent: strings.TrimSpace(line),
+									Description: "Propagation: 集合/对象修改 " + currentVar + "." + m + "(" + av + ")",
+								})
+								for m := len(intermediateSteps) - 1; m >= 0; m-- {
+									argSteps = append(argSteps, intermediateSteps[m])
+								}
+								return argSteps, true
+							}
+						}
+					}
+				}
+			}
+		}
+
 		parts := strings.Split(line, "=")
 		if len(parts) < 2 {
 			continue
@@ -991,7 +1023,6 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 		// Check if targetVar is the parameter itself or a property/method of the parameter
 		if paramName == targetVar || strings.HasPrefix(targetVar, paramName+".") {
 			// Check if parameter itself is a Source (e.g. @RequestParam)
-			// fmt.Printf("DEBUG: Found parameter match %s in %s\n", paramName, methodInfo.Name)
 			for _, src := range sourcePatterns {
 				if matchPattern(src, param) {
 					// Found Source!
