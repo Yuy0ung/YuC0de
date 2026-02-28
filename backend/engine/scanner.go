@@ -135,11 +135,18 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 							continue
 						}
 						// Create a single step for the sink
+						desc := "Sink: Pattern Match (" + pattern + ")"
+						if rule.ID == "mybatis-sqli" {
+							desc = "Sink: MyBatis XML Direct SQL Execution (Pattern: " + pattern + ")"
+						} else if rule.ID == "hardcoded-secrets" {
+							desc = "Sink: 发现硬编码敏感信息"
+						}
+
 						steps := []Step{{
 							FilePath:    relPath,
 							LineNumber:  i + 1,
 							LineContent: strings.TrimSpace(line),
-							Description: "Sink: MyBatis XML Direct SQL Execution (Pattern: " + pattern + ")",
+							Description: desc,
 						}}
 
 						// Special handling for MyBatis SQL Injection
@@ -472,11 +479,21 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 							if found {
 								// fmt.Printf("FOUND Trace for %s!\n", varName)
 								// Add Sink step
+								// Clean up sink description
+								displaySink := sink
+								if strings.Contains(displaySink, "\\") {
+									displaySink = strings.ReplaceAll(displaySink, "\\", "")
+								}
+								// If it's a long regex (like MyBatis pattern), simplify it
+								if len(displaySink) > 50 {
+									displaySink = "Pattern Match"
+								}
+
 								trace = append(trace, Step{
 									FilePath:    relPath,
 									LineNumber:  i + 1,
 									LineContent: strings.TrimSpace(line),
-									Description: "Sink: " + sink + " (Triggered by " + varName + ")",
+									Description: fmt.Sprintf("Sink: 触发点 %s (由变量 %s 触发)", displaySink, varName),
 								})
 
 								vulns = append(vulns, Vulnerability{

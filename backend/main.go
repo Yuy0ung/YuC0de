@@ -246,6 +246,7 @@ func startScan(c *gin.Context) {
 				broadcastTasks() // Notify failed
 				return
 			}
+			fmt.Printf("git clone successful: %s,scan start\n", t.ScanPath)
 		}
 
 		eng, err := engine.NewEngine("rules")
