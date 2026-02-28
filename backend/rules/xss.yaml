@@ -1,8 +1,7 @@
 id: java-xss
 name: 跨站脚本攻击(XSS)
 severity: MEDIUM
-description: Detects potential XSS via direct response writing. Ensure output is encoded/escaped.
-language: java
+description: 检测通过直接响应写入产生的潜在XSS漏洞。请确保输出已编码/转义。
 patterns:
   - "response\\.getWriter\\(\\)\\.write\\("
   - "response\\.getWriter\\(\\)\\.print\\("
@@ -22,3 +21,4 @@ sanitizers:
   - "StringEscapeUtils.escapeHtml"
   - "HtmlUtils.htmlEscape"
   - "URLEncoder.encode"
+

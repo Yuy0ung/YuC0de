@@ -1,8 +1,7 @@
 id: mybatis-sqli
 name: MyBatis SQL注入
 severity: HIGH
-description: Detects MyBatis SQL injection via variable substitution (${...}). Use #{...} instead.
-language: xml
+description: 检测MyBatis中通过变量替换(${...})产生的SQL注入漏洞。请使用#{...}。
 patterns:
   - "\\$\\{[^}]+\\}"
 sources:
@@ -12,3 +11,4 @@ sources:
   - "request.getParameter"
   - "System.in"
   - "Scanner"
+

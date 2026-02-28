@@ -1,8 +1,7 @@
 id: java-rce
 name: 远程代码/命令执行(RCE)
 severity: HIGH
-description: Detects command execution in Java. Avoid using Runtime.exec or ProcessBuilder with user input.
-language: java
+description: 检测Java中的命令执行。避免在Runtime.exec或ProcessBuilder中使用用户输入。
 patterns:
   - "Runtime\\.getRuntime\\(\\)\\.exec\\("
   - "new ProcessBuilder\\("
@@ -19,3 +18,4 @@ sinks:
   - "Runtime\\.getRuntime\\(\\)\\.exec\\("
   - "ProcessImpl\\.start\\("
   - "\\.start\\(\\)"
+

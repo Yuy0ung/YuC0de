@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gopkg.in/yaml.v3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -17,6 +19,16 @@ import (
 )
 
 // Database Models
+type RuleModel struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+	Filename    string `gorm:"primaryKey" json:"filename"` // Use Filename as PK to allow ID changes
+	Content     string `json:"content"`                    // Full YAML
+}
+
 type Task struct {
 	ID         uint      `gorm:"primaryKey" json:"id"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -132,11 +144,16 @@ func initDB() {
 	if err != nil {
 		panic("failed to connect database")
 	}
-	db.AutoMigrate(&Task{}, &VulnerabilityRecord{})
+	// Drop table to ensure schema change if needed (careful in prod, okay for dev tool)
+	if db.Migrator().HasTable(&RuleModel{}) {
+		db.Migrator().DropTable(&RuleModel{})
+	}
+	db.AutoMigrate(&Task{}, &VulnerabilityRecord{}, &RuleModel{})
 }
 
 func main() {
 	initDB()
+	initRulesDB()
 
 	// Initialize and start SSE broker
 	taskBroker = NewBroker()
@@ -171,18 +188,73 @@ func main() {
 		api.POST("/tasks/delete", deleteTasks)
 		api.GET("/tasks/:id", getTask)
 		api.GET("/files", getFileContent)
+		api.POST("/rules/update", updateRule)
+		api.POST("/rules/toggle", toggleRule)
+		api.POST("/rules/create", createRule)
+		api.POST("/rules/delete", deleteRule)
 	}
 
 	r.Run(":8080")
 }
 
-func listRules(c *gin.Context) {
-	eng, err := engine.NewEngine("rules")
+func initRulesDB() {
+	files, err := os.ReadDir("rules")
 	if err != nil {
+		fmt.Printf("Error reading rules directory: %v\n", err)
+		return
+	}
+
+	for _, f := range files {
+		if filepath.Ext(f.Name()) == ".yaml" || filepath.Ext(f.Name()) == ".yml" {
+			path := filepath.Join("rules", f.Name())
+			content, err := os.ReadFile(path)
+			if err != nil {
+				fmt.Printf("Error reading rule file %s: %v\n", f.Name(), err)
+				continue
+			}
+
+			var rule engine.Rule
+			if err := yaml.Unmarshal(content, &rule); err != nil {
+				fmt.Printf("Error parsing rule file %s: %v\n", f.Name(), err)
+				continue
+			}
+
+			// Check if rule exists in DB
+			var existingRule RuleModel
+			if err := db.Where("filename = ?", f.Name()).First(&existingRule).Error; err == nil {
+				// Update existing record, preserve Enabled status
+				existingRule.ID = rule.ID
+				existingRule.Name = rule.Name
+				existingRule.Severity = rule.Severity
+				existingRule.Description = rule.Description
+				existingRule.Content = string(content)
+				// Do not update Enabled field from YAML
+				db.Save(&existingRule)
+			} else {
+				// Create new record, default Enabled to true
+				newRule := RuleModel{
+					ID:          rule.ID,
+					Name:        rule.Name,
+					Severity:    rule.Severity,
+					Description: rule.Description,
+					Enabled:     true, // Default to true for new rules
+					Filename:    f.Name(),
+					Content:     string(content),
+				}
+				db.Create(&newRule)
+			}
+		}
+	}
+	fmt.Println("Rules initialized in DB")
+}
+
+func listRules(c *gin.Context) {
+	var rules []RuleModel
+	if err := db.Find(&rules).Error; err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, eng.Rules)
+	c.JSON(200, rules)
 }
 
 func startScan(c *gin.Context) {
@@ -249,7 +321,20 @@ func startScan(c *gin.Context) {
 			fmt.Printf("git clone successful: %s,scan start\n", t.ScanPath)
 		}
 
-		eng, err := engine.NewEngine("rules")
+		// Load enabled rules from DB
+		var rules []RuleModel
+		if err := db.Find(&rules).Error; err != nil {
+			db.Model(&t).Update("Status", "FAILED")
+			broadcastTasks()
+			return
+		}
+
+		enabledRules := make(map[string]bool)
+		for _, r := range rules {
+			enabledRules[r.Filename] = r.Enabled
+		}
+
+		eng, err := engine.NewEngine("rules", enabledRules)
 		if err != nil {
 			db.Model(&t).Update("Status", "FAILED")
 			broadcastTasks() // Notify failed
@@ -388,4 +473,189 @@ func getFileContent(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"content": string(content)})
+}
+
+func updateRule(c *gin.Context) {
+	var req struct {
+		Filename string `json:"filename"`
+		Content  string `json:"content"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		fmt.Printf("Update rule bind error: %v\n", err)
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	if strings.Contains(req.Filename, "/") || strings.Contains(req.Filename, "\\") {
+		c.JSON(400, gin.H{"error": "Invalid filename"})
+		return
+	}
+
+	// 1. Write to file
+	path := filepath.Join("rules", req.Filename)
+	if err := os.WriteFile(path, []byte(req.Content), 0644); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 2. Parse content to update DB
+	var rule engine.Rule
+	if err := yaml.Unmarshal([]byte(req.Content), &rule); err != nil {
+		fmt.Printf("Update rule unmarshal error: %v\nContent: %s\n", err, req.Content)
+		c.JSON(400, gin.H{"error": "Invalid YAML content: " + err.Error()})
+		return
+	}
+
+	// 3. Update DB
+	var existingRule RuleModel
+	if err := db.Where("filename = ?", req.Filename).First(&existingRule).Error; err == nil {
+		fmt.Printf("Updating existing rule in DB: %s (ID: %s)\n", req.Filename, existingRule.ID)
+		// Update existing record
+		// Use Updates to ensure we update the specific fields we want
+		// Also update ID if it changed in YAML (though usually it shouldn't)
+		updates := map[string]interface{}{
+			"id":          rule.ID,
+			"name":        rule.Name,
+			"severity":    rule.Severity,
+			"description": rule.Description,
+			"content":     req.Content,
+		}
+
+		if err := db.Model(&existingRule).Updates(updates).Error; err != nil {
+			fmt.Printf("Error updating rule in DB: %v\n", err)
+			c.JSON(500, gin.H{"error": "DB update failed: " + err.Error()})
+			return
+		}
+		fmt.Printf("Rule updated in DB successfully\n")
+	} else {
+		fmt.Printf("Creating new rule in DB: %s (ID: %s)\n", req.Filename, rule.ID)
+		// Create new record
+		newRule := RuleModel{
+			ID:          rule.ID,
+			Name:        rule.Name,
+			Severity:    rule.Severity,
+			Description: rule.Description,
+			Enabled:     true, // Default to true
+			Filename:    req.Filename,
+			Content:     req.Content,
+		}
+		if err := db.Create(&newRule).Error; err != nil {
+			fmt.Printf("Error creating rule in DB: %v\n", err)
+			c.JSON(500, gin.H{"error": "DB create failed: " + err.Error()})
+			return
+		}
+		fmt.Printf("Rule created in DB successfully\n")
+	}
+
+	c.JSON(200, gin.H{"message": "Rule updated"})
+}
+
+func toggleRule(c *gin.Context) {
+	var req struct {
+		Filename string `json:"filename"`
+		Enabled  bool   `json:"enabled"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Update DB only
+	if err := db.Model(&RuleModel{}).Where("filename = ?", req.Filename).Update("enabled", req.Enabled).Error; err != nil {
+		c.JSON(500, gin.H{"error": "DB update failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Rule toggled"})
+}
+
+func createRule(c *gin.Context) {
+	var req struct {
+		Filename string `json:"filename"`
+		Content  string `json:"content"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	if strings.Contains(req.Filename, "/") || strings.Contains(req.Filename, "\\") {
+		c.JSON(400, gin.H{"error": "Invalid filename"})
+		return
+	}
+
+	// Ensure filename has .yaml extension
+	if !strings.HasSuffix(req.Filename, ".yaml") && !strings.HasSuffix(req.Filename, ".yml") {
+		req.Filename += ".yaml"
+	}
+
+	path := filepath.Join("rules", req.Filename)
+	// Check if file already exists
+	if _, err := os.Stat(path); err == nil {
+		c.JSON(400, gin.H{"error": "Rule file already exists"})
+		return
+	}
+
+	// 1. Write to file
+	if err := os.WriteFile(path, []byte(req.Content), 0644); err != nil {
+		c.JSON(500, gin.H{"error": "Failed to write file: " + err.Error()})
+		return
+	}
+
+	// 2. Parse content to create DB record
+	var rule engine.Rule
+	if err := yaml.Unmarshal([]byte(req.Content), &rule); err != nil {
+		os.Remove(path) // Rollback file creation
+		c.JSON(400, gin.H{"error": "Invalid YAML content: " + err.Error()})
+		return
+	}
+
+	// 3. Create DB record
+	newRule := RuleModel{
+		ID:          rule.ID,
+		Name:        rule.Name,
+		Severity:    rule.Severity,
+		Description: rule.Description,
+		Enabled:     true, // Default enabled for new rules
+		Filename:    req.Filename,
+		Content:     req.Content,
+	}
+
+	if err := db.Create(&newRule).Error; err != nil {
+		os.Remove(path) // Rollback file creation
+		c.JSON(500, gin.H{"error": "DB create failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Rule created successfully"})
+}
+
+func deleteRule(c *gin.Context) {
+	var req struct {
+		Filenames []string `json:"filenames"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	for _, filename := range req.Filenames {
+		if strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
+			continue // Skip invalid filenames for security
+		}
+
+		// 1. Delete file
+		path := filepath.Join("rules", filename)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Error deleting file %s: %v\n", filename, err)
+			// Continue to try deleting from DB even if file deletion fails (maybe file already gone)
+		}
+
+		// 2. Delete from DB
+		if err := db.Where("filename = ?", filename).Delete(&RuleModel{}).Error; err != nil {
+			fmt.Printf("Error deleting rule from DB %s: %v\n", filename, err)
+		}
+	}
+
+	c.JSON(200, gin.H{"message": "Rules deleted successfully"})
 }

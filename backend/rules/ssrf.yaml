@@ -1,8 +1,7 @@
 id: java-ssrf
 name: 服务器端请求伪造(SSRF)
 severity: HIGH
-description: Detects SSRF via URL connection or HTTP clients. Validate input URLs against an allowlist.
-language: java
+description: 检测通过URL连接或HTTP客户端产生的SSRF漏洞。请根据白名单验证输入URL。
 patterns:
   - "new URL\\(.*\\)\\.openConnection"
   - "URLConnection"
@@ -27,3 +26,4 @@ sinks:
   - "\\.openStream\\("
   - "\\.postForObject\\("
   - "ImageIO\\.read\\("
+

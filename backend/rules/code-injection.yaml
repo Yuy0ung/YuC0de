@@ -1,8 +1,7 @@
 id: java-code-injection
 name: 代码/表达式注入
 severity: HIGH
-description: Detects dynamic code or expression evaluation which can lead to Code Execution.
-language: java
+description: 检测可能导致代码执行的动态代码或表达式评估。
 patterns:
   - "ScriptEngine"
   - "GroovyShell"

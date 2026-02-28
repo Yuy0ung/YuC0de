@@ -1,7 +1,7 @@
 id: java-deserialization
 name: 不安全的反序列化
 severity: HIGH
-description: Detects unsafe deserialization which can lead to Remote Code Execution.
+description: 检测可能导致命令执行的不安全的反序列化漏洞。
 language: java
 patterns:
   - "readObject\\("

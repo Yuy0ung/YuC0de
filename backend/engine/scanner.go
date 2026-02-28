@@ -20,13 +20,15 @@ type Rule struct {
 	Name        string   `yaml:"name" json:"name"`
 	Severity    string   `yaml:"severity" json:"severity"` // HIGH, MEDIUM, LOW
 	Description string   `yaml:"description" json:"description"`
-	Language    string   `yaml:"language" json:"language"`
 	Patterns    []string `yaml:"patterns" json:"patterns"` // Regex patterns
 	// Simple simulation of taint tracking: Source and Sink must exist in the file
 	Sources         []string `yaml:"sources,omitempty" json:"sources,omitempty"`
 	Sinks           []string `yaml:"sinks,omitempty" json:"sinks,omitempty"`
 	Sanitizers      []string `yaml:"sanitizers,omitempty" json:"sanitizers,omitempty"`
 	ExcludePatterns []string `yaml:"exclude_patterns,omitempty" json:"exclude_patterns,omitempty"`
+	Enabled         *bool    `yaml:"enabled,omitempty" json:"enabled"`
+	Filename        string   `yaml:"-" json:"filename"`
+	Content         string   `yaml:"-" json:"content"`
 }
 
 // Vulnerability represents a found issue
@@ -56,7 +58,7 @@ type Engine struct {
 }
 
 // NewEngine creates a new engine and loads rules from a directory
-func NewEngine(rulesDir string) (*Engine, error) {
+func NewEngine(rulesDir string, enabledRules map[string]bool) (*Engine, error) {
 	// Initialize Index
 	ProjectIndex = NewSymbolTable()
 
@@ -76,6 +78,18 @@ func NewEngine(rulesDir string) (*Engine, error) {
 			if err := yaml.Unmarshal(content, &rule); err != nil {
 				continue
 			}
+
+			// Set enabled status from map
+			enabled, exists := enabledRules[f.Name()]
+			if !exists {
+				// If not in map (e.g. new file not in DB yet), default to true
+				enabled = true
+			}
+			rule.Enabled = &enabled
+
+			rule.Filename = f.Name()
+			rule.Content = string(content)
+
 			rules = append(rules, rule)
 			// fmt.Printf("Loaded rule: %s\n", rule.ID)
 		}
@@ -98,17 +112,25 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 	relPath := toRelative(path, rootDir)
 
 	for _, rule := range e.Rules {
-		// Check language extension
-		ext := strings.ToLower(filepath.Ext(path))
-		if rule.Language != "" && !strings.Contains(rule.Language, ext[1:]) && rule.Language != "all" {
-			// specific check for java
-			if rule.Language == "java" && ext != ".java" {
-				continue
-			}
-			if rule.Language == "xml" && ext != ".xml" {
-				continue
-			}
+		// Check if rule is enabled
+		if rule.Enabled != nil && !*rule.Enabled {
+			continue
 		}
+
+		// Check language extension
+		// Removed language check as per requirement
+		/*
+			ext := strings.ToLower(filepath.Ext(path))
+			if rule.Language != "" && !strings.Contains(rule.Language, ext[1:]) && rule.Language != "all" {
+				// specific check for java
+				if rule.Language == "java" && ext != ".java" {
+					continue
+				}
+				if rule.Language == "xml" && ext != ".xml" {
+					continue
+				}
+			}
+		*/
 
 		// Helper to check exclusion
 		isExcluded := func(line string) bool {
@@ -134,6 +156,12 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 						if isExcluded(line) {
 							continue
 						}
+
+						// Specific check for mybatis-sqli: only scan XML files
+						if rule.ID == "mybatis-sqli" && !strings.HasSuffix(path, ".xml") {
+							continue
+						}
+
 						// Create a single step for the sink
 						desc := "Sink: Pattern Match (" + pattern + ")"
 						if rule.ID == "mybatis-sqli" {
@@ -295,8 +323,60 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 						}
 
 						// Found Sink, now trace back variables
-						vars := extractVariables(line)
-						for _, varName := range vars {
+						// Optimization: Identify sink method arguments to avoid tracing the sink object itself (e.g. response)
+						var varsToCheck []string
+						loc := reSink.FindStringIndex(line)
+						var args []string
+						var name string
+						if loc != nil {
+							matchedSinkStr := line[loc[0]:loc[1]]
+							if strings.Contains(matchedSinkStr, "(") {
+								name = strings.TrimSuffix(matchedSinkStr, "(")
+								name = strings.TrimSpace(name)
+								name = strings.TrimPrefix(name, ".")
+								// Handle "new ProcessBuilder(" -> "ProcessBuilder"
+								if idx := strings.LastIndex(name, " "); idx != -1 {
+									name = name[idx+1:]
+								}
+
+								// Extract arguments
+								args = extractArguments(line, name)
+							}
+						}
+
+						if len(args) > 0 {
+							hasArgs := false
+							for _, arg := range args {
+								if strings.TrimSpace(arg) != "" {
+									hasArgs = true
+									break
+								}
+							}
+
+							if hasArgs {
+								// Check variables inside arguments
+								for _, arg := range args {
+									argVars := extractVariables(arg)
+									varsToCheck = append(varsToCheck, argVars...)
+								}
+							}
+
+							// ALSO check caller object for receiver-based sinks (e.g. expression.getValue(ctx))
+							// But filter out safe/output objects to avoid XSS false positives (e.g. response.print(payload))
+							objName := findCallerObject(line, name)
+							if objName != "" {
+								// We cannot check isSafeParameterType here easily as we don't have the type info yet.
+								// However, the traceBack function will check isSafeParameterType when it hits a parameter definition.
+								// So it is safe to add the object to varsToCheck.
+								// If the object traces back to a Safe Parameter (like HttpServletResponse), the trace will terminate without a report.
+								varsToCheck = append(varsToCheck, objName)
+							}
+						} else {
+							// Fallback: Check all variables in the line
+							varsToCheck = extractVariables(line)
+						}
+
+						for _, varName := range varsToCheck {
 							// Optimization: Ignore variables that are only on the LHS of an assignment
 							// This prevents tracing the result of a sink (e.g. rowsAffected = stmt.executeUpdate(sql))
 							// which can lead to cross-case contamination if the variable is reused.
@@ -810,7 +890,7 @@ func traceUsages(methodName string, rootDir string) []Step {
 }
 
 // traceBack tries graph-based analysis first, then falls back to legacy regex
-func traceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
+func traceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, sinkPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
 	// Limit recursion depth
 	if depth > 10 {
 		return nil, false
@@ -841,16 +921,16 @@ func traceBack(path string, lines []string, startIndex int, targetVar string, so
 	// fmt.Printf("DEBUG: traceBack depth=%d file=%s target=%s\n", depth, path, targetVar)
 
 	// Try Graph Analysis
-	steps, found := graphTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, depth, rootDir, visited)
+	steps, found := graphTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, sinkPatterns, depth, rootDir, visited)
 	if found {
 		return steps, true
 	}
 	// Fallback to Legacy
-	return legacyTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, depth, rootDir)
+	return legacyTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, sinkPatterns, depth, rootDir)
 }
 
 // graphTraceBack searches backwards using the Symbol Table (Graph-based)
-func graphTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
+func graphTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, sinkPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
 	if depth > 20 {
 		return nil, false
 	}
@@ -1080,9 +1160,15 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 
 		// Check if targetVar is the parameter itself or a property/method of the parameter
 		if paramName == targetVar || strings.HasPrefix(targetVar, paramName+".") {
+			// Optimization: Check if parameter type is safe/output-related (e.g. HttpServletResponse)
+			if isSafeParameterType(param) {
+				return nil, false
+			}
+
 			// Check if parameter itself is a Source (e.g. @RequestParam)
 			for _, src := range sourcePatterns {
-				if matchPattern(src, param) {
+				matched := matchPattern(src, param)
+				if matched {
 					// Found Source!
 					steps = append(steps, Step{
 						FilePath:    toRelative(path, rootDir),
@@ -1233,14 +1319,19 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 }
 
 func isSafeParameterType(paramDecl string) bool {
+	// These types are framework objects that are used for output or context,
+	// and should not be treated as user-controlled input sources.
 	safeTypes := []string{
 		"HttpServletResponse",
-		"HttpServletRequest",
-		"HttpSession",
+		// "HttpServletRequest", // Request object itself might be a source if passed to sink, so we don't exclude it blindly
+		// "HttpSession",        // Session might contain tainted data
 		"Model",
 		"ModelMap",
 		"BindingResult",
 		"Errors",
+		// "MultipartFile", // File upload handling might be separate, but usually file content is source, not the object wrapper?
+		// Actually MultipartFile might have .getOriginalFilename() which is tainted.
+		// So better NOT exclude MultipartFile.
 	}
 	for _, t := range safeTypes {
 		if strings.Contains(paramDecl, t) {
@@ -1534,7 +1625,7 @@ func isSafeExecuteType(typeName string) bool {
 	return false
 }
 
-func legacyTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string) ([]Step, bool) {
+func legacyTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, sinkPatterns []string, depth int, rootDir string) ([]Step, bool) {
 	// Original regex-based logic with improved robustness
 	var steps []Step
 	// Default limit: look back 50 lines (sufficient for most local variables)
@@ -1545,8 +1636,9 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 	}
 
 	// Fix: Restrict to current method boundary to prevent cross-method taint propagation
+	var methodInfo *MethodInfo
 	if ProjectIndex != nil {
-		methodInfo := ProjectIndex.GetMethodByLine(path, startIndex+1)
+		methodInfo = ProjectIndex.GetMethodByLine(path, startIndex+1)
 		if methodInfo != nil {
 			methodStartIdx := methodInfo.StartLine - 1
 			if methodStartIdx > limit {
@@ -1573,14 +1665,34 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 			if i > limit {
 				limit = i
 			}
+
+			// Fix for false positives: If we have valid methodInfo, parameters are already checked in graphTraceBack.
+			// Do NOT re-check them here using naive regex, as it can cause false positives
+			// (e.g. matching @RequestParam on the same line but for a different parameter).
+			if methodInfo != nil {
+				continue
+			}
 		}
 
 		if !strings.Contains(removeStringContent(line), targetVar) {
 			continue
 		}
 
-		// 1. Direct Source Check (for parameters or direct usage)
+		// Check Intermediate Sink
 		cleanLine := removeStringContent(line)
+		for _, sink := range sinkPatterns {
+			if matchPattern(sink, cleanLine) {
+				steps = append(steps, Step{
+					FilePath:    toRelative(path, rootDir),
+					LineNumber:  i + 1,
+					LineContent: strings.TrimSpace(line),
+					Description: "Intermediate Sink: " + sink,
+				})
+				return steps, true
+			}
+		}
+
+		// 1. Direct Source Check (for parameters or direct usage)
 		for _, src := range sourcePatterns {
 			if matchPattern(src, cleanLine) {
 				// Avoid false positives: ensure targetVar is actually in the line (already checked)
@@ -1612,7 +1724,7 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 				// Recurse
 				rhsVars := extractVariables(rhs)
 				for _, v := range rhsVars {
-					subSteps, found := legacyTraceBack(path, lines, i, v, sourcePatterns, sanitizerPatterns, depth+1, rootDir)
+					subSteps, found := legacyTraceBack(path, lines, i, v, sourcePatterns, sanitizerPatterns, sinkPatterns, depth+1, rootDir)
 					if found {
 						subSteps = append(subSteps, Step{
 							FilePath:    toRelative(path, rootDir),

@@ -1,8 +1,7 @@
 id: java-xxe
 name: XML外部实体注入(XXE)
 severity: HIGH
-description: Detects XML parsing without disabling external entities.
-language: java
+description: 检测未禁用外部实体的XML解析操作。
 patterns:
   - "DocumentBuilderFactory"
   - "SAXParserFactory"
@@ -29,3 +28,4 @@ exclude_patterns:
   - "Byte\\.parse"
   - "Short\\.parse"
   - "InternetAddress\\.parse"
+

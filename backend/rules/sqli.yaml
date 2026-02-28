@@ -1,8 +1,7 @@
 id: java-sqli
 name: SQL注入
 severity: HIGH
-description: Detects SQL injection via string concatenation (JDBC/JPA/Hibernate). Use PreparedStatement or parameterized queries.
-language: java
+description: 检测通过字符串拼接（JDBC/JPA/Hibernate）产生的SQL注入漏洞。请使用PreparedStatement或参数化查询。
 patterns:
   - "(?i)select.*from.*\\+"
   - "(?i)update.*set.*\\+"
@@ -26,3 +25,4 @@ sinks:
   - "createNativeQuery\\("
   - "queryForList\\("
   - "queryForObject\\("
+
