@@ -145,7 +145,7 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 						// Special handling for MyBatis SQL Injection
 						if rule.ID == "mybatis-sqli" && strings.HasSuffix(path, ".xml") {
 							// Try to find the corresponding Java Mapper interface
-							javaStep, methodID := findMyBatisSource(path, lines, i, rootDir)
+							javaStep, methodID, targetClassName := findMyBatisSource(path, lines, i, rootDir)
 							if javaStep != nil {
 								// Trace usages
 								usageSteps := traceUsages(methodID, rootDir)
@@ -170,6 +170,12 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 										var tracedBackSteps []Step
 										if err == nil {
 											usageLines := strings.Split(string(contentBytes), "\n")
+
+											// Validate usage: Ensure it calls the Mapper method
+											if !isValidUsage(usage.LineContent, usageLines, usage.LineNumber, methodID, targetClassName, rootDir, absUsagePath) {
+												continue
+											}
+
 											// Extract arguments passed to methodID
 											args := extractArguments(usage.LineContent, methodID)
 											if len(args) > 0 {
@@ -287,12 +293,34 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 							// Optimization: Ignore variables that are only on the LHS of an assignment
 							// This prevents tracing the result of a sink (e.g. rowsAffected = stmt.executeUpdate(sql))
 							// which can lead to cross-case contamination if the variable is reused.
-							parts := strings.Split(line, "=")
-							if len(parts) >= 2 {
-								lhs := parts[0]
+							// Robust split: Find the first '=' that is NOT inside quotes
+							var splitIdx int = -1
+							inQuote := false
+							escaped := false
+							for k, r := range line {
+								if escaped {
+									escaped = false
+									continue
+								}
+								if r == '\\' {
+									escaped = true
+									continue
+								}
+								if r == '"' {
+									inQuote = !inQuote
+									continue
+								}
+								if !inQuote && r == '=' {
+									splitIdx = k
+									break
+								}
+							}
+
+							if splitIdx != -1 {
+								lhs := line[:splitIdx]
 								if isVariableOnLHS(lhs, varName) {
 									// It is on LHS. Check if it is also on RHS.
-									rhs := strings.Join(parts[1:], "=")
+									rhs := line[splitIdx+1:]
 									rhsVars := extractVariables(rhs)
 									onRHS := false
 									for _, rv := range rhsVars {
@@ -312,8 +340,6 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 							// E.g. response.append("<li>") -> "li" is extracted as var, but it's a string literal part.
 							// Real var should be inside parens.
 
-							// Check if varName is actually an argument to the sink method
-							// This is a heuristic for .append() style sinks
 							if strings.Contains(sink, "append") || strings.Contains(line, ".append(") {
 								// Check if varName is within the parens of append(...)
 								// This is tricky with regex, but we can check if it's "append(...varName...)"
@@ -598,7 +624,7 @@ func removeStringContent(line string) string {
 }
 
 // findMyBatisSource attempts to locate the Java method that corresponds to the MyBatis XML SQL statement
-func findMyBatisSource(xmlPath string, xmlLines []string, lineIdx int, rootDir string) (*Step, string) {
+func findMyBatisSource(xmlPath string, xmlLines []string, lineIdx int, rootDir string) (*Step, string, string) {
 	// Look for <select/insert/update/delete id="...">
 	for i := lineIdx; i >= 0; i-- {
 		line := xmlLines[i]
@@ -643,7 +669,7 @@ func findMyBatisSource(xmlPath string, xmlLines []string, lineIdx int, rootDir s
 							LineNumber:  methodInfo.StartLine,
 							LineContent: "public " + methodInfo.ReturnType + " " + methodInfo.Name + "(...)",
 							Description: "Propagation: Mapper 接口定义",
-						}, methodName
+						}, methodName, className
 					}
 				}
 
@@ -700,12 +726,16 @@ func findMyBatisSource(xmlPath string, xmlLines []string, lineIdx int, rootDir s
 						}
 
 						if isMatch {
+							// Infer className from fPath
+							baseName := filepath.Base(fPath)
+							className := strings.TrimSuffix(baseName, ".java")
+
 							return &Step{
 								FilePath:    toRelative(fPath, rootDir),
 								LineNumber:  lineNum,
 								LineContent: strings.TrimSpace(content),
 								Description: "Propagation: Mapper 接口定义",
-							}, methodName
+							}, methodName, className
 						}
 					}
 				}
@@ -713,7 +743,7 @@ func findMyBatisSource(xmlPath string, xmlLines []string, lineIdx int, rootDir s
 		}
 	}
 
-	return nil, ""
+	return nil, "", ""
 }
 
 func traceUsages(methodName string, rootDir string) []Step {
@@ -811,6 +841,12 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 	// 1. Identify current Method context
 	methodInfo := ProjectIndex.GetMethodByLine(path, startIndex+1)
 
+	if methodInfo != nil {
+		// fmt.Printf("DEBUG: Found method %s for file %s line %d\n", methodInfo.Name, path, startIndex+1)
+	} else {
+		// fmt.Printf("DEBUG: Method NOT FOUND for file %s line %d\n", path, startIndex+1)
+	}
+
 	// If not in a method, graph analysis is impossible
 	if methodInfo == nil {
 		return nil, false
@@ -907,83 +943,88 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 			}
 
 			// Check Method Call: var = obj.method(args)
-			callRe := regexp.MustCompile(`([\w]+)\.([\w]+)\(`)
-			matches := callRe.FindStringSubmatch(rhs)
-			if len(matches) > 2 {
-				objName := matches[1]
-				methodName := matches[2]
+			// Regex to match method calls, allowing chained calls (e.g. obj.method().method2())
+			// We iterate over all matches to find the one that propagates taint
+			callRe := regexp.MustCompile(`([^\s=]+)\.([\w]+)\(`)
+			allMatches := callRe.FindAllStringSubmatch(rhs, -1)
 
-				// Use ClassName from MethodInfo
-				currentClassName := methodInfo.ClassName
-				resolvedClass := ProjectIndex.ResolveType(objName, currentClassName)
+			for _, matches := range allMatches {
+				if len(matches) > 2 {
+					objName := matches[1]
+					methodName := matches[2]
 
-				calleeInfo := ProjectIndex.GetMethodInfo(resolvedClass, methodName)
-				if calleeInfo != nil {
-					// Trace into Callee
-					calleeContent, err := ioutil.ReadFile(calleeInfo.FilePath)
-					if err == nil {
-						calleeLines := strings.Split(string(calleeContent), "\n")
+					// Use ClassName from MethodInfo
+					currentClassName := methodInfo.ClassName
+					resolvedClass := ProjectIndex.ResolveType(objName, currentClassName)
 
-						// Find returns
-						for k := calleeInfo.StartLine; k <= calleeInfo.EndLine && k < len(calleeLines); k++ {
-							if strings.Contains(calleeLines[k], "return ") {
-								retVars := extractVariables(strings.ReplaceAll(calleeLines[k], "return", ""))
-								for _, rv := range retVars {
-									calleeSteps, found := traceBack(calleeInfo.FilePath, calleeLines, k+1, rv, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
-									if found {
-										calleeSteps = append(calleeSteps, Step{
-											FilePath:    toRelative(path, rootDir),
-											LineNumber:  i + 1,
-											LineContent: strings.TrimSpace(line),
-											Description: "Propagation: 跨文件追踪 - " + currentVar + " 来自 " + resolvedClass + "." + methodName,
-										})
-										for m := len(intermediateSteps) - 1; m >= 0; m-- {
-											calleeSteps = append(calleeSteps, intermediateSteps[m])
+					calleeInfo := ProjectIndex.GetMethodInfo(resolvedClass, methodName)
+					if calleeInfo != nil {
+						// Trace into Callee
+						calleeContent, err := ioutil.ReadFile(calleeInfo.FilePath)
+						if err == nil {
+							calleeLines := strings.Split(string(calleeContent), "\n")
+
+							// Find returns
+							for k := calleeInfo.StartLine; k <= calleeInfo.EndLine && k < len(calleeLines); k++ {
+								if strings.Contains(calleeLines[k], "return ") {
+									retVars := extractVariables(strings.ReplaceAll(calleeLines[k], "return", ""))
+									for _, rv := range retVars {
+										calleeSteps, found := traceBack(calleeInfo.FilePath, calleeLines, k+1, rv, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
+										if found {
+											calleeSteps = append(calleeSteps, Step{
+												FilePath:    toRelative(path, rootDir),
+												LineNumber:  i + 1,
+												LineContent: strings.TrimSpace(line),
+												Description: "Propagation: 跨文件追踪 - " + currentVar + " 来自 " + resolvedClass + "." + methodName,
+											})
+											for m := len(intermediateSteps) - 1; m >= 0; m-- {
+												calleeSteps = append(calleeSteps, intermediateSteps[m])
+											}
+											return calleeSteps, true
 										}
-										return calleeSteps, true
 									}
 								}
 							}
 						}
-					}
-				} else {
-					// Opaque Method Call Handling (e.g., Library methods or unparsed code)
-					// If we can't trace into the method, we assume the taint might come from:
-					// 1. The object itself (objName)
-					// 2. The arguments passed to the method
+					} else {
+						// Opaque Method Call Handling (e.g., Library methods or unparsed code)
+						// If we can't trace into the method, we assume the taint might come from:
+						// 1. The object itself (objName)
+						// 2. The arguments passed to the method
 
-					// Trace Object
-					objSteps, foundObj := traceBack(path, lines, i, objName, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
-					if foundObj {
-						objSteps = append(objSteps, Step{
-							FilePath:    toRelative(path, rootDir),
-							LineNumber:  i + 1,
-							LineContent: strings.TrimSpace(line),
-							Description: "Propagation: " + currentVar + " = " + objName + "." + methodName + "(...)",
-						})
-						for m := len(intermediateSteps) - 1; m >= 0; m-- {
-							objSteps = append(objSteps, intermediateSteps[m])
+						// Trace Object
+						objSteps, foundObj := traceBack(path, lines, i, objName, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
+						if foundObj {
+							objSteps = append(objSteps, Step{
+								FilePath:    toRelative(path, rootDir),
+								LineNumber:  i + 1,
+								LineContent: strings.TrimSpace(line),
+								Description: "Propagation: " + currentVar + " = " + objName + "." + methodName + "(...)",
+							})
+							for m := len(intermediateSteps) - 1; m >= 0; m-- {
+								objSteps = append(objSteps, intermediateSteps[m])
+							}
+							return objSteps, true
 						}
-						return objSteps, true
-					}
 
-					// Trace Arguments
-					args := extractArguments(removeStringContent(rhs), methodName)
-					for _, arg := range args {
-						argVars := extractVariables(arg)
-						for _, av := range argVars {
-							argSteps, foundArg := traceBack(path, lines, i, av, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
-							if foundArg {
-								argSteps = append(argSteps, Step{
-									FilePath:    toRelative(path, rootDir),
-									LineNumber:  i + 1,
-									LineContent: strings.TrimSpace(line),
-									Description: "Propagation: " + currentVar + " = " + objName + "." + methodName + "(..., " + av + ", ...)",
-								})
-								for m := len(intermediateSteps) - 1; m >= 0; m-- {
-									argSteps = append(argSteps, intermediateSteps[m])
+						// Trace Arguments
+						args := extractArguments(removeStringContent(rhs), methodName)
+						for _, arg := range args {
+							argVars := extractVariables(arg)
+							for _, av := range argVars {
+								argSteps, foundArg := traceBack(path, lines, i, av, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
+								if foundArg {
+									argSteps = append(argSteps, Step{
+										FilePath:    toRelative(path, rootDir),
+										LineNumber:  i + 1,
+										LineContent: strings.TrimSpace(line),
+										Description: "Propagation: " + currentVar + " = " + objName + "." + methodName + "(..., " + av + ", ...)",
+									})
+									for m := len(intermediateSteps) - 1; m >= 0; m-- {
+										argSteps = append(argSteps, intermediateSteps[m])
+									}
+									return argSteps, true
 								}
-								return argSteps, true
 							}
 						}
 					}
@@ -1041,6 +1082,9 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 
 			// Trace Callers using Reverse Call Graph
 			callers := ProjectIndex.CallerMap[methodInfo.Name]
+			// if methodInfo.Name == "unsafe" {
+			// 	fmt.Printf("DEBUG: Looking for callers of %s. Found %d callers.\n", methodInfo.Name, len(callers))
+			// }
 			// fmt.Printf("DEBUG: Looking for callers of %s. Found %d callers.\n", methodInfo.Name, len(callers))
 
 			// Limit number of callers to trace to avoid explosion
@@ -1087,6 +1131,37 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 					// precise check would need tokenization, but this is SAST
 					cleanLine := removeStringContent(line)
 					if strings.Contains(cleanLine, methodInfo.Name+"(") || strings.Contains(cleanLine, "."+methodInfo.Name+"(") {
+						// Context-Sensitive Check
+						objName := findCallerObject(cleanLine, methodInfo.Name)
+						// Check if we can resolve the object type
+						var actualType string
+
+						// Handle "new ClassName().method()"
+						if objName == "new" {
+							// fmt.Printf("DEBUG: Found new instantiation call for %s in %s\n", methodInfo.Name, cleanLine)
+							reNew := regexp.MustCompile(`new\s+([\w]+)`)
+							matches := reNew.FindStringSubmatch(cleanLine)
+							if len(matches) > 1 {
+								actualType = matches[1]
+								// fmt.Printf("DEBUG: Extracted type: %s\n", actualType)
+							}
+						} else if objName != "" && objName != "this" {
+							resolvedType := resolveContextVarType(callerLines, k, objName, cClass)
+							if resolvedType != "" {
+								actualType = ProjectIndex.ResolveType(resolvedType, cClass)
+							}
+						} else {
+							// Implicit 'this' or local call
+							actualType = cClass
+						}
+
+						// If we resolved a type, check compatibility
+						if actualType != "" {
+							if !isTypeCompatible(actualType, methodInfo.ClassName) {
+								continue
+							}
+						}
+
 						// Extract args
 						args := extractArguments(cleanLine, methodInfo.Name)
 						if len(args) > paramIdx {
@@ -1123,12 +1198,17 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 				return nil, false
 			}
 
-			return []Step{{
-				FilePath:    toRelative(path, rootDir),
-				LineNumber:  methodInfo.StartLine,
-				LineContent: "public " + methodInfo.ReturnType + " " + methodInfo.Name + "(...)",
-				Description: "Source: 参数入口 " + paramName,
-			}}, true
+			// Only report as Source if it's a Controller/Entry point
+			if isControllerOrEntryClass(methodInfo.ClassName, path) {
+				return []Step{{
+					FilePath:    toRelative(path, rootDir),
+					LineNumber:  methodInfo.StartLine,
+					LineContent: "public " + methodInfo.ReturnType + " " + methodInfo.Name + "(...)",
+					Description: "Source: 参数入口 " + paramName,
+				}}, true
+			}
+
+			return nil, false
 		}
 	}
 
@@ -1150,6 +1230,29 @@ func isSafeParameterType(paramDecl string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+func isControllerOrEntryClass(className string, filePath string) bool {
+	// Check standard naming conventions
+	lowerName := strings.ToLower(className)
+	if strings.HasSuffix(lowerName, "controller") ||
+		strings.HasSuffix(lowerName, "action") ||
+		strings.HasSuffix(lowerName, "servlet") ||
+		strings.HasSuffix(lowerName, "endpoint") ||
+		strings.HasSuffix(lowerName, "resource") { // JAX-RS
+		return true
+	}
+
+	// Check package/path conventions
+	lowerPath := strings.ToLower(filePath)
+	if strings.Contains(lowerPath, "/controller/") ||
+		strings.Contains(lowerPath, "/web/") ||
+		strings.Contains(lowerPath, "/api/") ||
+		strings.Contains(lowerPath, "/rest/") {
+		return true
+	}
+
 	return false
 }
 
@@ -1242,6 +1345,69 @@ func findCallerObject(line string, methodName string) string {
 	}
 
 	return ""
+}
+
+// isValidUsage verifies if a found usage actually calls the target method on the target class
+func isValidUsage(lineContent string, lines []string, lineNum int, methodName string, targetClassName string, rootDir string, absUsagePath string) bool {
+	// 1. Find Caller Object
+	objName := findCallerObject(lineContent, methodName)
+
+	// 2. Identify the class where usage occurs
+	var currentClass string
+	if ProjectIndex != nil {
+		classes := ProjectIndex.FileToClassesMap[absUsagePath]
+		if len(classes) > 0 {
+			currentClass = classes[0]
+		}
+	}
+	// Fallback: Infer from file name
+	if currentClass == "" {
+		base := filepath.Base(absUsagePath)
+		currentClass = strings.TrimSuffix(base, ".java")
+	}
+
+	// 3. Resolve the type of objName
+	var actualType string
+
+	// Handle "new ClassName().method()"
+	if objName == "new" {
+		reNew := regexp.MustCompile(`new\s+([\w]+)`)
+		matches := reNew.FindStringSubmatch(lineContent)
+		if len(matches) > 1 {
+			actualType = matches[1]
+		}
+	} else if objName == "" || objName == "this" {
+		// Implicit call to current class method
+		actualType = currentClass
+	} else {
+		resolvedType := resolveContextVarType(lines, lineNum-1, objName, currentClass)
+		if resolvedType != "" {
+			if ProjectIndex != nil {
+				actualType = ProjectIndex.ResolveType(resolvedType, currentClass)
+			} else {
+				actualType = resolvedType
+			}
+		}
+	}
+
+	// 4. Check Compatibility
+	if actualType != "" {
+		// If actualType is NOT targetClassName and NOT a subclass/implementation
+		// Note: isTypeCompatible returns true if actualType is or implements targetClassName
+		if !isTypeCompatible(actualType, targetClassName) {
+			return false
+		}
+	} else {
+		// If we couldn't resolve type, be conservative:
+		// If objName is "questionDao" and target is "QuestionMapper", it's likely valid.
+		// If objName is "" and currentClass is NOT target, it's likely INVALID (local call).
+		if objName == "" && currentClass != targetClassName {
+			// Local call in a different class -> definitely not the target method
+			return false
+		}
+	}
+
+	return true
 }
 
 // resolveVariableType attempts to find the type of a variable by scanning backwards
@@ -1465,4 +1631,109 @@ func getSnippet(lines []string, index int) string {
 		end = len(lines)
 	}
 	return strings.Join(lines[start:end], "\n")
+}
+
+func resolveContextVarType(lines []string, lineIdx int, varName string, currentClassName string) string {
+	// 1. Try local variable
+	localType := resolveVariableType(lines, lineIdx, varName)
+	if localType != "" {
+		return localType
+	}
+
+	// 2. Try class field (including inherited)
+	if ProjectIndex != nil && ProjectIndex.FieldMap != nil {
+		cls := currentClassName
+		visited := make(map[string]bool)
+
+		for cls != "" {
+			if visited[cls] {
+				break
+			}
+			visited[cls] = true
+
+			if fields, ok := ProjectIndex.FieldMap[cls]; ok {
+				if fieldType, ok := fields[varName]; ok {
+					return fieldType
+				}
+			}
+
+			// Check parent class
+			if ProjectIndex.ExtendsMap != nil {
+				if parentRaw, ok := ProjectIndex.ExtendsMap[cls]; ok && parentRaw != "" {
+					// Resolve parent full name using current class context
+					resolvedParent := ProjectIndex.ResolveType(parentRaw, cls)
+					// If resolution failed (returned same name) and it's simple name, it might be in same package
+					// ResolveType handles same package.
+					// If it returns simple name, it means it couldn't find it in ClassMap.
+					// But ClassMap keys are simple names? No, keys are simple names, values are full names.
+					// Wait, ResolveType:
+					// if fullName, ok := st.ClassMap[simpleName]; ok { return fullName }
+					// So if it returns something, it's likely a full name OR the simple name if not found.
+
+					if resolvedParent == cls {
+						break
+					}
+					cls = resolvedParent
+					continue
+				}
+			}
+			break
+		}
+	}
+	return ""
+}
+
+func isTypeCompatible(actualType, expectedType string) bool {
+	if actualType == expectedType {
+		return true
+	}
+	// Check simple names
+	actualSimple := simpleName(actualType)
+	expectedSimple := simpleName(expectedType)
+	if actualSimple == expectedSimple {
+		return true
+	}
+
+	// Check if actual implements expected (if expected is interface)
+	if ProjectIndex != nil && ProjectIndex.InterfaceMap != nil {
+		if impls, ok := ProjectIndex.InterfaceMap[expectedType]; ok {
+			for _, impl := range impls {
+				if impl == actualType || simpleName(impl) == actualSimple {
+					return true
+				}
+			}
+		}
+		// Also check by simple name
+		if impls, ok := ProjectIndex.InterfaceMap[expectedSimple]; ok {
+			for _, impl := range impls {
+				if impl == actualType || simpleName(impl) == actualSimple {
+					return true
+				}
+			}
+		}
+
+		// Check if expected implements actual (if actual is interface)
+		// This handles the case where caller uses Interface (actual) but target is Implementation (expected)
+		if impls, ok := ProjectIndex.InterfaceMap[actualType]; ok {
+			for _, impl := range impls {
+				if impl == expectedType || simpleName(impl) == expectedSimple {
+					return true
+				}
+			}
+		}
+		if impls, ok := ProjectIndex.InterfaceMap[actualSimple]; ok {
+			for _, impl := range impls {
+				if impl == expectedType || simpleName(impl) == expectedSimple {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func simpleName(fullName string) string {
+	parts := strings.Split(fullName, ".")
+	return parts[len(parts)-1]
 }

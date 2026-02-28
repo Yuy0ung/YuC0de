@@ -25,6 +25,10 @@ type SymbolTable struct {
 	CallerMap map[string][]string
 	// Map FilePath -> []FullClassName
 	FileToClassesMap map[string][]string
+	// Map FullClassName -> map[FieldName]FieldType
+	FieldMap map[string]map[string]string
+	// Map FullClassName -> ParentClassName (Simple or Full)
+	ExtendsMap map[string]string
 }
 
 type MethodInfo struct {
@@ -51,6 +55,8 @@ func NewSymbolTable() *SymbolTable {
 		PackageMap:       make(map[string]string),
 		CallerMap:        make(map[string][]string),
 		FileToClassesMap: make(map[string][]string),
+		FieldMap:         make(map[string]map[string]string),
+		ExtendsMap:       make(map[string]string),
 	}
 }
 
@@ -109,6 +115,21 @@ func (st *SymbolTable) indexFile(path string, mu *sync.Mutex) {
 		// Initialize MethodMap for this class
 		if st.MethodMap[fullClassName] == nil {
 			st.MethodMap[fullClassName] = make(map[string]*MethodInfo)
+		}
+
+		// Initialize FieldMap for this class
+		if st.FieldMap[fullClassName] == nil {
+			st.FieldMap[fullClassName] = make(map[string]string)
+		}
+
+		// Store Extends
+		if classNode.Extends != "" {
+			st.ExtendsMap[fullClassName] = classNode.Extends
+		}
+
+		// Store Fields
+		for _, field := range classNode.Fields {
+			st.FieldMap[fullClassName][field.Name] = field.Type
 		}
 
 		// Store Methods

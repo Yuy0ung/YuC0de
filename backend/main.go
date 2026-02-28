@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,89 @@ type VulnerabilityRecord struct {
 }
 
 var db *gorm.DB
+var taskBroker *Broker
+
+// SSE Broker
+type Broker struct {
+	Clients        map[chan string]bool
+	NewClients     chan chan string
+	DefunctClients chan chan string
+	Messages       chan string
+}
+
+func NewBroker() *Broker {
+	return &Broker{
+		Clients:        make(map[chan string]bool),
+		NewClients:     make(chan chan string),
+		DefunctClients: make(chan chan string),
+		Messages:       make(chan string),
+	}
+}
+
+func (b *Broker) Listen() {
+	for {
+		select {
+		case s := <-b.NewClients:
+			b.Clients[s] = true
+		case s := <-b.DefunctClients:
+			delete(b.Clients, s)
+			close(s)
+		case msg := <-b.Messages:
+			for s := range b.Clients {
+				s <- msg
+			}
+		}
+	}
+}
+
+func (b *Broker) ServeHTTP(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+
+	messageChan := make(chan string)
+	b.NewClients <- messageChan
+
+	// Send initial data
+	go func() {
+		var tasks []Task
+		if err := db.Order("created_at desc").Find(&tasks).Error; err == nil {
+			jsonData, _ := json.Marshal(tasks)
+			messageChan <- string(jsonData)
+		}
+	}()
+
+	defer func() {
+		b.DefunctClients <- messageChan
+	}()
+
+	c.Stream(func(w io.Writer) bool {
+		if msg, ok := <-messageChan; ok {
+			c.SSEvent("message", msg)
+			return true
+		}
+		return false
+	})
+}
+
+// broadcastTasks fetches all tasks and broadcasts them to connected clients
+func broadcastTasks() {
+	var tasks []Task
+	if err := db.Order("created_at desc").Find(&tasks).Error; err != nil {
+		fmt.Printf("Error fetching tasks for broadcast: %v\n", err)
+		return
+	}
+	jsonData, err := json.Marshal(tasks)
+	if err != nil {
+		fmt.Printf("Error marshalling tasks for broadcast: %v\n", err)
+		return
+	}
+	// Non-blocking send to avoid hanging if broker is busy (though Listen loop should be fast)
+	go func() {
+		taskBroker.Messages <- string(jsonData)
+	}()
+}
 
 func initDB() {
 	var err error
@@ -53,6 +137,10 @@ func initDB() {
 
 func main() {
 	initDB()
+
+	// Initialize and start SSE broker
+	taskBroker = NewBroker()
+	go taskBroker.Listen()
 
 	r := gin.Default()
 
@@ -79,6 +167,7 @@ func main() {
 		api.GET("/rules", listRules)
 		api.POST("/scan", startScan)
 		api.GET("/tasks", listTasks)
+		api.GET("/tasks/stream", taskBroker.ServeHTTP) // SSE endpoint
 		api.POST("/tasks/delete", deleteTasks)
 		api.GET("/tasks/:id", getTask)
 		api.GET("/files", getFileContent)
@@ -138,27 +227,23 @@ func startScan(c *gin.Context) {
 		ScanPath:   scanPath,
 	}
 	db.Create(&task)
+	broadcastTasks() // Notify pending
 
 	// Run scan asynchronously
 	go func(t Task) {
 		db.Model(&t).Update("Status", "RUNNING")
+		broadcastTasks() // Notify running
 
 		if t.SourceType == "git" {
 			// git clone
 			fmt.Printf("Cloning %s into %s\n", t.Target, t.ScanPath)
 			cmd := exec.Command("git", "clone", t.Target, t.ScanPath)
-			// Since ScanPath is an existing empty dir, git clone <url> <dir> works
-			// Note: git clone might fail if dir is not empty, but MkdirTemp guarantees it is.
-			// However, standard git clone <url> <dir> expects <dir> to be empty.
-			// If it fails, we should check if we need to empty it or if MkdirTemp created something weird.
-			// Actually, if we want to clone INTO the dir (content only), we might need `git clone <url> .` inside.
-			// But `git clone <url> <dir>` is standard.
 
 			if err := cmd.Run(); err != nil {
 				db.Model(&t).Update("Status", "FAILED")
 				fmt.Printf("git clone failed: %v\n", err)
-				// Cleanup
 				os.RemoveAll(t.ScanPath)
+				broadcastTasks() // Notify failed
 				return
 			}
 		}
@@ -166,12 +251,14 @@ func startScan(c *gin.Context) {
 		eng, err := engine.NewEngine("rules")
 		if err != nil {
 			db.Model(&t).Update("Status", "FAILED")
+			broadcastTasks() // Notify failed
 			return
 		}
 
 		vulns, err := eng.ScanDirectory(t.ScanPath)
 		if err != nil {
 			db.Model(&t).Update("Status", "FAILED")
+			broadcastTasks() // Notify failed
 			return
 		}
 
@@ -196,6 +283,7 @@ func startScan(c *gin.Context) {
 			"Status":    "COMPLETED",
 			"VulnCount": len(vulns),
 		})
+		broadcastTasks() // Notify completed
 	}(task)
 
 	c.JSON(200, task)
@@ -223,6 +311,8 @@ func deleteTasks(c *gin.Context) {
 		db.Delete(&t)
 		db.Where("task_id = ?", t.ID).Delete(&VulnerabilityRecord{})
 	}
+	broadcastTasks() // Notify deleted
+
 	c.JSON(200, gin.H{"message": "Tasks deleted"})
 }
 
@@ -277,7 +367,6 @@ func getFileContent(c *gin.Context) {
 
 	filePath := path
 	// If path is relative, we need task_id to resolve absolute path
-	// Note: filepath.IsAbs works differently on Windows vs Unix, assuming Unix for now based on env
 	if !filepath.IsAbs(path) && taskID != "" {
 		var task Task
 		if err := db.First(&task, taskID).Error; err != nil {

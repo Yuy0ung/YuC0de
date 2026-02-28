@@ -28,3 +28,4 @@ exclude_patterns:
   - "Boolean\\.parse"
   - "Byte\\.parse"
   - "Short\\.parse"
+  - "InternetAddress\\.parse"

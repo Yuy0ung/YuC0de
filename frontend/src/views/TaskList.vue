@@ -29,6 +29,9 @@
         <template v-else-if="column.key === 'status'">
           <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
         </template>
+        <template v-else-if="column.key === 'created_at'">
+          {{ formatDate(record.created_at) }}
+        </template>
       </template>
     </a-table>
 
@@ -49,7 +52,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, onUnmounted, computed } from 'vue';
 import axios from 'axios';
 import { message, Modal } from 'ant-design-vue';
 
@@ -59,6 +62,7 @@ const targetPath = ref('');
 const sourceType = ref('local');
 const loading = ref(false);
 const selectedRowKeys = ref([]);
+let eventSource = null;
 
 const hasSelected = computed(() => selectedRowKeys.value.length > 0);
 
@@ -106,7 +110,7 @@ const handleOk = async () => {
     });
     message.success('Scan started');
     visible.value = false;
-    fetchTasks();
+    // fetchTasks(); // SSE will update the list
   } catch (error) {
     message.error('Failed to start scan: ' + (error.response?.data?.error || error.message));
   }
@@ -124,7 +128,7 @@ const handleDelete = () => {
         await axios.post('http://localhost:8080/api/tasks/delete', { ids: selectedRowKeys.value });
         message.success('Tasks deleted');
         selectedRowKeys.value = [];
-        fetchTasks();
+        // fetchTasks(); // SSE will update the list
       } catch (error) {
         message.error('Failed to delete tasks: ' + (error.response?.data?.error || error.message));
       }
@@ -139,16 +143,44 @@ const statusColor = (status) => {
   return 'orange';
 };
 
-onMounted(() => {
-  fetchTasks();
-  // Poll every 5 seconds (silent update without loading spinner)
-  setInterval(async () => {
+const formatDate = (dateString) => {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${year}年${month}月${day}日 ${hours}:${minutes}:${seconds}`;
+};
+
+const setupSSE = () => {
+  eventSource = new EventSource('http://localhost:8080/api/tasks/stream');
+  
+  eventSource.onmessage = (event) => {
     try {
-      const res = await axios.get('http://localhost:8080/api/tasks');
-      tasks.value = res.data;
+      tasks.value = JSON.parse(event.data);
     } catch (e) {
-      // ignore
+      console.error('Failed to parse SSE data', e);
     }
-  }, 5000);
+  };
+
+  eventSource.onerror = (error) => {
+    console.error('SSE error', error);
+    // EventSource automatically attempts to reconnect
+  };
+};
+
+onMounted(() => {
+  // Initial fetch is handled by SSE connection or we can keep one explicit fetch
+  fetchTasks(); 
+  setupSSE();
+});
+
+onUnmounted(() => {
+  if (eventSource) {
+    eventSource.close();
+  }
 });
 </script>

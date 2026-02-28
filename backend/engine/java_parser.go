@@ -530,18 +530,128 @@ func isKeyword(s string) bool {
 }
 
 func (p *Parser) isFieldStart() bool {
-	// Identifier Identifier ; or =
-	// Just a heuristic
-	return false // Skip for now to keep it simple
+	// Simple check: [modifiers] [annotations] Type Name ; [= ...]
+	// We look for: identifier identifier ; or identifier identifier =
+	// Skip annotations and modifiers
+	i := 0
+	for p.pos+i < len(p.tokens) {
+		t := p.tokens[p.pos+i]
+		if t.Value == "@" {
+			i += 2 // @ Name
+			if p.pos+i < len(p.tokens) && p.tokens[p.pos+i].Value == "(" {
+				// Skip balanced parens
+				i++
+				count := 1
+				for p.pos+i < len(p.tokens) {
+					if p.tokens[p.pos+i].Value == "(" {
+						count++
+					} else if p.tokens[p.pos+i].Value == ")" {
+						count--
+						if count == 0 {
+							i++
+							break
+						}
+					}
+					i++
+				}
+			}
+			continue
+		}
+		modifiers := []string{"public", "private", "protected", "static", "final", "transient", "volatile"}
+		if contains(modifiers, t.Value) {
+			i++
+			continue
+		}
+		break
+	}
+
+	// Now we should be at the Type
+	if p.pos+i < len(p.tokens) && p.tokens[p.pos+i].Type == TOKEN_IDENTIFIER {
+		i++
+		// Check for Generics <...>
+		if p.pos+i < len(p.tokens) && p.tokens[p.pos+i].Value == "<" {
+			i++
+			count := 1
+			for p.pos+i < len(p.tokens) {
+				if p.tokens[p.pos+i].Value == "<" {
+					count++
+				} else if p.tokens[p.pos+i].Value == ">" {
+					count--
+					if count == 0 {
+						i++
+						break
+					}
+				}
+				i++
+			}
+		}
+
+		// Now we should be at the Name
+		if p.pos+i < len(p.tokens) && p.tokens[p.pos+i].Type == TOKEN_IDENTIFIER {
+			// Check if next is ; or =
+			if p.pos+i+1 < len(p.tokens) {
+				next := p.tokens[p.pos+i+1].Value
+				return next == ";" || next == "="
+			}
+		}
+	}
+	return false
 }
 
 func (p *Parser) parseField() *FieldNode {
-	// Skip until ;
-	for p.peek().Value != ";" && p.pos < len(p.tokens) {
+	// Skip annotations
+	for p.peek().Value == "@" {
+		p.next() // @
+		p.next() // Name
+		if p.peek().Value == "(" {
+			p.next()
+			p.skipBalanced("(", ")")
+		}
+	}
+
+	// Skip modifiers
+	modifiers := []string{"public", "private", "protected", "static", "final", "transient", "volatile"}
+	for contains(modifiers, p.peek().Value) {
 		p.next()
 	}
-	p.next()
-	return nil
+
+	// Type
+	typeStr := p.next().Value
+	// Handle generics
+	if p.peek().Value == "<" {
+		p.next()
+		p.skipBalanced("<", ">")
+		typeStr += "<...>"
+	}
+
+	// Name
+	nameStr := p.next().Value
+
+	// Skip until ; (but respect braces/parens)
+	braceCount := 0
+	parenCount := 0
+	for p.pos < len(p.tokens) {
+		t := p.peek()
+		if t.Value == ";" && braceCount == 0 && parenCount == 0 {
+			break
+		}
+		if t.Value == "{" {
+			braceCount++
+		} else if t.Value == "}" {
+			braceCount--
+		} else if t.Value == "(" {
+			parenCount++
+		} else if t.Value == ")" {
+			parenCount--
+		}
+		p.next()
+	}
+	p.consume(";")
+
+	return &FieldNode{
+		Name: nameStr,
+		Type: typeStr,
+	}
 }
 
 func (p *Parser) skipBalanced(open, close string) {
