@@ -890,7 +890,7 @@ func traceUsages(methodName string, rootDir string) []Step {
 }
 
 // traceBack tries graph-based analysis first, then falls back to legacy regex
-func traceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, sinkPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
+func traceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
 	// Limit recursion depth
 	if depth > 10 {
 		return nil, false
@@ -921,16 +921,16 @@ func traceBack(path string, lines []string, startIndex int, targetVar string, so
 	// fmt.Printf("DEBUG: traceBack depth=%d file=%s target=%s\n", depth, path, targetVar)
 
 	// Try Graph Analysis
-	steps, found := graphTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, sinkPatterns, depth, rootDir, visited)
+	steps, found := graphTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, depth, rootDir, visited)
 	if found {
 		return steps, true
 	}
 	// Fallback to Legacy
-	return legacyTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, sinkPatterns, depth, rootDir)
+	return legacyTraceBack(path, lines, startIndex, targetVar, sourcePatterns, sanitizerPatterns, depth, rootDir)
 }
 
 // graphTraceBack searches backwards using the Symbol Table (Graph-based)
-func graphTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, sinkPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
+func graphTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string, visited map[string]bool) ([]Step, bool) {
 	if depth > 20 {
 		return nil, false
 	}
@@ -1329,9 +1329,7 @@ func isSafeParameterType(paramDecl string) bool {
 		"ModelMap",
 		"BindingResult",
 		"Errors",
-		// "MultipartFile", // File upload handling might be separate, but usually file content is source, not the object wrapper?
-		// Actually MultipartFile might have .getOriginalFilename() which is tainted.
-		// So better NOT exclude MultipartFile.
+		// "MultipartFile", // Removed because MultipartFile content IS a source (e.g. file.getInputStream())
 	}
 	for _, t := range safeTypes {
 		if strings.Contains(paramDecl, t) {
@@ -1625,7 +1623,7 @@ func isSafeExecuteType(typeName string) bool {
 	return false
 }
 
-func legacyTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, sinkPatterns []string, depth int, rootDir string) ([]Step, bool) {
+func legacyTraceBack(path string, lines []string, startIndex int, targetVar string, sourcePatterns []string, sanitizerPatterns []string, depth int, rootDir string) ([]Step, bool) {
 	// Original regex-based logic with improved robustness
 	var steps []Step
 	// Default limit: look back 50 lines (sufficient for most local variables)
@@ -1678,21 +1676,8 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 			continue
 		}
 
-		// Check Intermediate Sink
-		cleanLine := removeStringContent(line)
-		for _, sink := range sinkPatterns {
-			if matchPattern(sink, cleanLine) {
-				steps = append(steps, Step{
-					FilePath:    toRelative(path, rootDir),
-					LineNumber:  i + 1,
-					LineContent: strings.TrimSpace(line),
-					Description: "Intermediate Sink: " + sink,
-				})
-				return steps, true
-			}
-		}
-
 		// 1. Direct Source Check (for parameters or direct usage)
+		cleanLine := removeStringContent(line)
 		for _, src := range sourcePatterns {
 			if matchPattern(src, cleanLine) {
 				// Avoid false positives: ensure targetVar is actually in the line (already checked)
@@ -1724,7 +1709,7 @@ func legacyTraceBack(path string, lines []string, startIndex int, targetVar stri
 				// Recurse
 				rhsVars := extractVariables(rhs)
 				for _, v := range rhsVars {
-					subSteps, found := legacyTraceBack(path, lines, i, v, sourcePatterns, sanitizerPatterns, sinkPatterns, depth+1, rootDir)
+					subSteps, found := legacyTraceBack(path, lines, i, v, sourcePatterns, sanitizerPatterns, depth+1, rootDir)
 					if found {
 						subSteps = append(subSteps, Step{
 							FilePath:    toRelative(path, rootDir),
