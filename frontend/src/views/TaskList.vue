@@ -63,6 +63,9 @@ const sourceType = ref('local');
 const loading = ref(false);
 const selectedRowKeys = ref([]);
 let eventSource = null;
+let reconnectTimer = null;
+const retryCount = ref(0);
+const maxRetries = 15;
 
 const hasSelected = computed(() => selectedRowKeys.value.length > 0);
 
@@ -156,8 +159,20 @@ const formatDate = (dateString) => {
 };
 
 const setupSSE = () => {
+  if (eventSource) {
+    eventSource.close();
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+  }
+
   eventSource = new EventSource('http://localhost:8080/api/tasks/stream');
   
+  eventSource.onopen = () => {
+    console.log('SSE connected');
+    retryCount.value = 0;
+  };
+
   eventSource.onmessage = (event) => {
     try {
       tasks.value = JSON.parse(event.data);
@@ -168,7 +183,17 @@ const setupSSE = () => {
 
   eventSource.onerror = (error) => {
     console.error('SSE error', error);
-    // EventSource automatically attempts to reconnect
+    eventSource.close();
+    
+    if (retryCount.value < maxRetries) {
+      retryCount.value++;
+      console.log(`SSE Reconnecting... attempt ${retryCount.value}/${maxRetries}`);
+      reconnectTimer = setTimeout(() => {
+        setupSSE();
+      }, 5000);
+    } else {
+      message.error('连接已断开，请手动刷新页面重试');
+    }
   };
 };
 
@@ -181,6 +206,9 @@ onMounted(() => {
 onUnmounted(() => {
   if (eventSource) {
     eventSource.close();
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
   }
 });
 </script>

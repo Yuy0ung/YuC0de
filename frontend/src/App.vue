@@ -1,8 +1,9 @@
 <template>
   <a-layout style="min-height: 100vh">
-    <a-layout-header>
-      <div class="logo" style="float: left; color: white; font-size: 20px; font-weight: bold; margin-right: 20px;">
-        YuC0de
+    <a-layout-header style="padding: 0 12px;">
+      <div class="logo" style="float: left; margin-right: 20px; display: flex; align-items: center; height: 64px;">
+        <img src="/yuc0de.svg" alt="YuC0de Logo" style="height: 40px; border-radius: 6px; margin-right: 12px;" />
+        <span style="color: white; font-size: 20px; font-weight: bold; letter-spacing: 1px;">YuC0de</span>
       </div>
       <a-menu theme="dark" mode="horizontal" :style="{ lineHeight: '64px' }">
         <a-menu-item key="1">

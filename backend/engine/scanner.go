@@ -369,6 +369,15 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 								// However, the traceBack function will check isSafeParameterType when it hits a parameter definition.
 								// So it is safe to add the object to varsToCheck.
 								// If the object traces back to a Safe Parameter (like HttpServletResponse), the trace will terminate without a report.
+
+								// If object starts with Uppercase (likely a Class for static call),
+								// we should check all variables in the line because sensitive data might be in method arguments
+								// e.g. Request.Get(url).execute() -> objName="Request", but we need "url"
+								if len(objName) > 0 && unicode.IsUpper([]rune(objName)[0]) {
+									vars := extractVariables(line)
+									varsToCheck = append(varsToCheck, vars...)
+								}
+
 								varsToCheck = append(varsToCheck, objName)
 							}
 						} else {
@@ -554,7 +563,6 @@ func (e *Engine) ScanFile(path string, rootDir string) ([]Vulnerability, error) 
 							// So it SHOULD be found.
 
 							// Trace back this variable
-							// fmt.Printf("Tracing var: %s for sink: %s in rule: %s\n", varName, sink, rule.ID)
 							trace, found := traceBack(path, lines, i, varName, rule.Sources, rule.Sanitizers, 0, rootDir, nil)
 							if found {
 								// fmt.Printf("FOUND Trace for %s!\n", varName)
@@ -978,15 +986,18 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 
 		// Check for Collection modification methods: var.add(arg), var.append(arg), etc.
 		if strings.Contains(line, currentVar+".") {
-			// Patterns: .add(, .addAll(, .put(, .append(, .insert(
-			methods := []string{"add", "addAll", "put", "append", "insert"}
+			// Patterns: .add(, .addAll(, .put(, .append(, .insert(, .Get(, .Post(
+			methods := []string{"add", "addAll", "put", "append", "insert", "Get", "Post"}
 			for _, m := range methods {
-				if strings.Contains(line, currentVar+"."+m+"(") {
+				if strings.Contains(line, currentVar+"."+m+"(") || strings.Contains(line, "."+m+"("+currentVar) {
 					// Extract arguments
 					args := extractArguments(removeStringContent(line), m)
 					for _, arg := range args {
 						argVars := extractVariables(arg)
 						for _, av := range argVars {
+							if av == currentVar {
+								continue
+							}
 							// Trace back the argument
 							argSteps, foundArg := traceBack(path, lines, i, av, sourcePatterns, sanitizerPatterns, depth+1, rootDir, visited)
 							if foundArg {
@@ -994,7 +1005,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 									FilePath:    toRelative(path, rootDir),
 									LineNumber:  i + 1,
 									LineContent: strings.TrimSpace(line),
-									Description: "Propagation: 集合/对象修改 " + currentVar + "." + m + "(" + av + ")",
+									Description: "Propagation: 方法调用参数 " + m + "(" + av + ")",
 								})
 								for m := len(intermediateSteps) - 1; m >= 0; m-- {
 									argSteps = append(argSteps, intermediateSteps[m])
@@ -1003,6 +1014,7 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 							}
 						}
 					}
+					// Also check if currentVar is the object calling the method (already handled by objSteps in other places, but here for graphTraceBack)
 				}
 			}
 		}
