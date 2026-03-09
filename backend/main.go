@@ -15,6 +15,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	"yy-sast-backend/cpg"
 	"yy-sast-backend/engine"
 )
 
@@ -155,6 +156,9 @@ func main() {
 	initDB()
 	initRulesDB()
 
+	// Initialize CPG module
+	cpg.Init(db)
+
 	// Initialize and start SSE broker
 	taskBroker = NewBroker()
 	go taskBroker.Listen()
@@ -192,6 +196,10 @@ func main() {
 		api.POST("/rules/toggle", toggleRule)
 		api.POST("/rules/create", createRule)
 		api.POST("/rules/delete", deleteRule)
+
+		// CPG Endpoints
+		api.GET("/cpg/nodes/:taskId", cpg.ListNodesHandler)
+		api.GET("/cpg/graph/:taskId", cpg.GetGraphHandler)
 	}
 
 	r.Run(":8080")

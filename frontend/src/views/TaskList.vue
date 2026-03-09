@@ -24,7 +24,14 @@
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'action'">
-          <router-link :to="'/task/' + record.id">View Details</router-link>
+          <a-space>
+            <router-link :to="'/task/' + record.id">
+              <a-button type="link" size="small">Detail</a-button>
+            </router-link>
+            <router-link :to="'/cpg/' + record.id">
+              <a-button type="link" size="small">CPG Analysis</a-button>
+            </router-link>
+          </a-space>
         </template>
         <template v-else-if="column.key === 'status'">
           <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
