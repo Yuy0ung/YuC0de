@@ -394,7 +394,8 @@ func (p *Parser) parseMethod() *MethodNode {
 	// Handle generic return type
 	if p.peek().Value == "<" {
 		p.next()
-		p.skipBalanced("<", ">")
+		gen := p.consumeBalanced("<", ">")
+		returnType += "<" + gen + ">"
 	}
 
 	// Method Name
@@ -428,7 +429,8 @@ func (p *Parser) parseMethod() *MethodNode {
 			// Generics
 			if p.peek().Value == "<" {
 				p.next()
-				p.skipBalanced("<", ">")
+				gen := p.consumeBalanced("<", ">")
+				typeStr += "<" + gen + ">"
 			}
 			// Array
 			for p.peek().Value == "[" {
@@ -620,8 +622,8 @@ func (p *Parser) parseField() *FieldNode {
 	// Handle generics
 	if p.peek().Value == "<" {
 		p.next()
-		p.skipBalanced("<", ">")
-		typeStr += "<...>"
+		gen := p.consumeBalanced("<", ">")
+		typeStr += "<" + gen + ">"
 	}
 
 	// Name
@@ -656,20 +658,6 @@ func (p *Parser) parseField() *FieldNode {
 
 func (p *Parser) skipBalanced(open, close string) {
 	count := 1
-	// p.consume(open) // Assumed already consumed or we are at it?
-	// Let's assume we are AT the character after the first open,
-	// OR we loop until count is 0.
-	// If the caller consumed '(', count is 1.
-	// We iterate.
-
-	// Wait, my previous usage was inconsistent.
-	// Let's fix: caller does NOT consume the opening token if it calls skipBalanced on it?
-	// Actually, simplified: just loop.
-
-	// Correct logic:
-	// We scan forward. If we see open, count++. If close, count--.
-	// We assume we are *after* the first open.
-
 	for p.pos < len(p.tokens) {
 		t := p.next()
 		if t.Value == open {
@@ -681,6 +669,24 @@ func (p *Parser) skipBalanced(open, close string) {
 			}
 		}
 	}
+}
+
+func (p *Parser) consumeBalanced(open, close string) string {
+	var sb strings.Builder
+	count := 1
+	for p.pos < len(p.tokens) {
+		t := p.next()
+		if t.Value == open {
+			count++
+		} else if t.Value == close {
+			count--
+			if count == 0 {
+				return sb.String()
+			}
+		}
+		sb.WriteString(t.Value)
+	}
+	return sb.String()
 }
 
 // Helpers

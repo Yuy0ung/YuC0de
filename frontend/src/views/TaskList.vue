@@ -1,19 +1,22 @@
 <template>
   <div>
-    <div style="margin-bottom: 16px">
-      <a-button type="primary" @click="showModal">New Scan</a-button>
-      <a-button 
-        type="primary" 
-        danger 
-        style="margin-left: 8px" 
-        :disabled="!hasSelected" 
-        @click="handleDelete"
-      >
-        Delete Selected
-      </a-button>
-      <span style="margin-left: 8px" v-if="hasSelected">
-        {{ selectedRowKeys.length }} items selected
-      </span>
+    <div style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
+      <div>
+        <a-button type="primary" @click="showModal">New Scan</a-button>
+        <a-button 
+          type="primary" 
+          danger 
+          style="margin-left: 8px" 
+          :disabled="!hasSelected" 
+          @click="handleDelete"
+        >
+          Delete Selected
+        </a-button>
+        <span style="margin-left: 8px" v-if="hasSelected">
+          {{ selectedRowKeys.length }} items selected
+        </span>
+      </div>
+      <a-button @click="openAIConfig">AI Settings</a-button>
     </div>
     <a-table 
       :dataSource="tasks" 
@@ -53,6 +56,23 @@
         <a-form-item :label="sourceType === 'local' ? 'Target Path (Absolute Path)' : 'Git Repository URL'">
           <a-input v-model:value="targetPath" :placeholder="sourceType === 'local' ? '/Users/username/project' : 'https://github.com/username/repo.git'" />
         </a-form-item>
+        <a-form-item label="AI Audit">
+          <a-checkbox v-model:checked="aiEnabled">Enable AI Audit</a-checkbox>
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
+    <a-modal v-model:open="aiConfigVisible" title="AI Configuration" @ok="saveAIConfig">
+      <a-form layout="vertical">
+        <a-form-item label="Base URL">
+          <a-input v-model:value="aiConfig.base_url" placeholder="https://api.openai.com/v1" />
+        </a-form-item>
+        <a-form-item label="API Key">
+          <a-input-password v-model:value="aiConfig.api_key" placeholder="sk-..." />
+        </a-form-item>
+        <a-form-item label="Model">
+          <a-input v-model:value="aiConfig.model" placeholder="gpt-4" />
+        </a-form-item>
       </a-form>
     </a-modal>
   </div>
@@ -73,6 +93,36 @@ let eventSource = null;
 let reconnectTimer = null;
 const retryCount = ref(0);
 const maxRetries = 15;
+
+const aiEnabled = ref(false);
+const aiConfigVisible = ref(false);
+const aiConfig = ref({
+  base_url: '',
+  api_key: '',
+  model: '',
+  language: 'zh'
+});
+
+const openAIConfig = async () => {
+  try {
+    const res = await axios.get('http://localhost:8080/api/ai/config');
+    aiConfig.value = res.data;
+    aiConfigVisible.value = true;
+  } catch (error) {
+    // If config doesn't exist, just open empty form or default
+    aiConfigVisible.value = true;
+  }
+};
+
+const saveAIConfig = async () => {
+  try {
+    await axios.post('http://localhost:8080/api/ai/config', aiConfig.value);
+    message.success('AI Config saved');
+    aiConfigVisible.value = false;
+  } catch (error) {
+    message.error('Failed to save AI config');
+  }
+};
 
 const hasSelected = computed(() => selectedRowKeys.value.length > 0);
 
@@ -106,6 +156,7 @@ const showModal = () => {
   visible.value = true;
   targetPath.value = '';
   sourceType.value = 'local';
+  aiEnabled.value = false;
 };
 
 const handleOk = async () => {
@@ -116,7 +167,8 @@ const handleOk = async () => {
   try {
     await axios.post('http://localhost:8080/api/scan', { 
       target: targetPath.value,
-      source_type: sourceType.value
+      source_type: sourceType.value,
+      ai_enabled: aiEnabled.value
     });
     message.success('Scan started');
     visible.value = false;

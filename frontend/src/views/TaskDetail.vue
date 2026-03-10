@@ -12,7 +12,9 @@
                 <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
                   <span style="font-weight: 500;">{{ group.ruleName }}</span>
                   <div style="display: flex; align-items: center;">
-                    <a-tag :color="group.severity === 'HIGH' ? 'red' : group.severity === 'MEDIUM' ? 'orange' : 'green'" style="margin-right: 8px;">{{ group.severity }}</a-tag>
+                    <a-tag :color="group.severity === 'HIGH' ? 'red' : group.severity === 'MEDIUM' ? 'orange' : 'green'" style="margin-right: 8px;">
+                      {{ group.severity }}
+                    </a-tag>
                     <span style="color: #999; font-size: 12px;">{{ group.count }}个</span>
                   </div>
                 </div>
@@ -22,8 +24,9 @@
                   <a-list-item @click="selectVuln(item)" style="cursor: pointer; padding: 6px 16px; border-bottom: 1px solid #e8e8e8;" :class="{ 'selected-item': selectedVuln && selectedVuln.id === item.id }">
                     <a-list-item-meta>
                       <template #title>
-                        <div style="font-size: 12px; color: #888; word-break: break-all; font-family: monospace;">
-                          {{ item.file_path }}:{{ item.line_number }}
+                        <div style="font-size: 12px; color: #888; word-break: break-all; font-family: monospace; display: flex; align-items: center;">
+                          <span>{{ item.file_path }}:{{ item.line_number }}</span>
+                          <a-tag v-if="isItemFalsePositive(item)" color="grey" style="margin-left: 4px; font-size: 10px; line-height: 16px; height: 18px; padding: 0 4px;">误报</a-tag>
                         </div>
                       </template>
                     </a-list-item-meta>
@@ -43,9 +46,25 @@
       <div v-if="selectedVuln" style="flex: 1; display: flex; flex-direction: column; overflow: hidden;">
         <div style="padding: 16px; border-bottom: 1px solid #f0f0f0;">
           <h3 style="margin: 0 0 8px 0;">Code Preview</h3>
-          <div style="margin-bottom: 8px;">
-             <a-tag color="blue">Line {{ currentActiveLine }}</a-tag>
-             <span style="color: #666;">{{ getRelativePath(currentFilePath) }}</span>
+          <div style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between;">
+             <div>
+               <a-tag color="blue">Line {{ currentActiveLine }}</a-tag>
+               <span style="color: #666;">{{ getRelativePath(currentFilePath) }}</span>
+             </div>
+             <div v-if="aiAnalysis">
+               <a-tag :color="aiAnalysis.is_false_positive ? 'grey' : 'red'">
+                 {{ aiAnalysis.is_false_positive ? 'AI: 误报' : 'AI: 确认漏洞' }}
+               </a-tag>
+             </div>
+          </div>
+        </div>
+
+        <div v-if="aiAnalysis" style="padding: 16px; background: #f9f9f9; border-bottom: 1px solid #f0f0f0;">
+          <h4 style="margin: 0 0 8px 0;">AI 审计结果</h4>
+          <div style="font-size: 13px; color: #333;">
+            <p style="margin-bottom: 4px;"><strong>判定理由:</strong> {{ aiAnalysis.reason }}</p>
+            <p v-if="aiAnalysis.sanitization" style="margin-bottom: 4px;"><strong>净化方式:</strong> {{ aiAnalysis.sanitization }}</p>
+            <p style="margin-bottom: 0;"><strong>置信度:</strong> {{ aiAnalysis.confidence }}</p>
           </div>
         </div>
         
@@ -155,6 +174,25 @@ const currentActiveLine = ref(0);
 const totalLines = ref(0);
 const indentations = ref([]);
 const taskTarget = ref('');
+
+const aiAnalysis = computed(() => {
+  if (!selectedVuln.value || !selectedVuln.value.ai_analysis) return null;
+  try {
+    return JSON.parse(selectedVuln.value.ai_analysis);
+  } catch (e) {
+    return null;
+  }
+});
+
+const isItemFalsePositive = (item) => {
+  try {
+    if (!item.ai_analysis) return false;
+    const analysis = JSON.parse(item.ai_analysis);
+    return analysis && analysis.is_false_positive;
+  } catch (e) {
+    return false;
+  }
+};
 
 const fetchTask = async () => {
   loading.value = true;

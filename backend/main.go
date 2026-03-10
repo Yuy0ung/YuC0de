@@ -20,6 +20,14 @@ import (
 )
 
 // Database Models
+type AIConfig struct {
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"`
+	Model    string `json:"model"`
+	Language string `json:"language"` // "en" or "zh", default "zh"
+}
+
 type RuleModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -38,6 +46,7 @@ type Task struct {
 	SourceType string    `json:"source_type"` // "local" or "git"
 	ScanPath   string    `json:"scan_path"`   // Actual path on disk
 	VulnCount  int       `json:"vuln_count"`
+	AIEnabled  bool      `json:"ai_enabled"`
 }
 
 type VulnerabilityRecord struct {
@@ -51,6 +60,7 @@ type VulnerabilityRecord struct {
 	Snippet     string `json:"snippet"`
 	LineContent string `json:"line_content"`
 	StepsJSON   string `json:"steps_json"`
+	AIAnalysis  string `json:"ai_analysis"` // JSON string: { "is_false_positive": bool, "reason": "...", "sanitization": "..." }
 }
 
 var db *gorm.DB
@@ -149,7 +159,19 @@ func initDB() {
 	if db.Migrator().HasTable(&RuleModel{}) {
 		db.Migrator().DropTable(&RuleModel{})
 	}
-	db.AutoMigrate(&Task{}, &VulnerabilityRecord{}, &RuleModel{})
+	db.AutoMigrate(&Task{}, &VulnerabilityRecord{}, &RuleModel{}, &AIConfig{})
+
+	// Initialize default AI config if not exists
+	var count int64
+	db.Model(&AIConfig{}).Count(&count)
+	if count == 0 {
+		db.Create(&AIConfig{
+			BaseURL:  "https://api.openai.com/v1",
+			APIKey:   "",
+			Model:    "gpt-4o",
+			Language: "zh",
+		})
+	}
 }
 
 func main() {
@@ -192,6 +214,8 @@ func main() {
 		api.POST("/tasks/delete", deleteTasks)
 		api.GET("/tasks/:id", getTask)
 		api.GET("/files", getFileContent)
+		api.GET("/ai/config", getAIConfig)
+		api.POST("/ai/config", updateAIConfig)
 		api.POST("/rules/update", updateRule)
 		api.POST("/rules/toggle", toggleRule)
 		api.POST("/rules/create", createRule)
@@ -269,6 +293,7 @@ func startScan(c *gin.Context) {
 	var req struct {
 		Target     string `json:"target"`
 		SourceType string `json:"source_type"`
+		AIEnabled  bool   `json:"ai_enabled"`
 	}
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
@@ -305,82 +330,89 @@ func startScan(c *gin.Context) {
 		Target:     target,
 		SourceType: sourceType,
 		ScanPath:   scanPath,
+		AIEnabled:  req.AIEnabled,
 	}
 	db.Create(&task)
 	broadcastTasks() // Notify pending
 
 	// Run scan asynchronously
-	go func(t Task) {
-		db.Model(&t).Update("Status", "RUNNING")
-		broadcastTasks() // Notify running
-
-		if t.SourceType == "git" {
-			// git clone
-			fmt.Printf("Cloning %s into %s\n", t.Target, t.ScanPath)
-			cmd := exec.Command("git", "clone", t.Target, t.ScanPath)
-
-			if err := cmd.Run(); err != nil {
-				db.Model(&t).Update("Status", "FAILED")
-				fmt.Printf("git clone failed: %v\n", err)
-				os.RemoveAll(t.ScanPath)
-				broadcastTasks() // Notify failed
-				return
-			}
-			fmt.Printf("git clone successful: %s,scan start\n", t.ScanPath)
-		}
-
-		// Load enabled rules from DB
-		var rules []RuleModel
-		if err := db.Find(&rules).Error; err != nil {
-			db.Model(&t).Update("Status", "FAILED")
-			broadcastTasks()
-			return
-		}
-
-		enabledRules := make(map[string]bool)
-		for _, r := range rules {
-			enabledRules[r.Filename] = r.Enabled
-		}
-
-		eng, err := engine.NewEngine("rules", enabledRules)
-		if err != nil {
-			db.Model(&t).Update("Status", "FAILED")
-			broadcastTasks() // Notify failed
-			return
-		}
-
-		vulns, err := eng.ScanDirectory(t.ScanPath)
-		if err != nil {
-			db.Model(&t).Update("Status", "FAILED")
-			broadcastTasks() // Notify failed
-			return
-		}
-
-		// Save results
-		for _, v := range vulns {
-			stepsBytes, _ := json.Marshal(v.Steps)
-			rec := VulnerabilityRecord{
-				TaskID:      t.ID,
-				RuleID:      v.RuleID,
-				RuleName:    v.RuleName,
-				Severity:    v.Severity,
-				FilePath:    v.FilePath,
-				LineNumber:  v.LineNumber,
-				Snippet:     v.Snippet,
-				LineContent: v.LineContent,
-				StepsJSON:   string(stepsBytes),
-			}
-			db.Create(&rec)
-		}
-
-		db.Model(&t).Updates(map[string]interface{}{
-			"Status":    "COMPLETED",
-			"VulnCount": len(vulns),
-		})
-		broadcastTasks() // Notify completed
-	}(task)
+	go runScan(task)
 
 	c.JSON(200, task)
+}
+
+func runScan(t Task) {
+	db.Model(&t).Update("Status", "RUNNING")
+	broadcastTasks() // Notify running
+
+	if t.SourceType == "git" {
+		// git clone
+		fmt.Printf("Cloning %s into %s\n", t.Target, t.ScanPath)
+		cmd := exec.Command("git", "clone", t.Target, t.ScanPath)
+
+		if err := cmd.Run(); err != nil {
+			db.Model(&t).Update("Status", "FAILED")
+			fmt.Printf("git clone failed: %v\n", err)
+			os.RemoveAll(t.ScanPath)
+			broadcastTasks() // Notify failed
+			return
+		}
+		fmt.Printf("git clone successful: %s,scan start\n", t.ScanPath)
+	}
+
+	// Load enabled rules from DB
+	var rules []RuleModel
+	if err := db.Find(&rules).Error; err != nil {
+		db.Model(&t).Update("Status", "FAILED")
+		broadcastTasks()
+		return
+	}
+
+	enabledRules := make(map[string]bool)
+	for _, r := range rules {
+		enabledRules[r.Filename] = r.Enabled
+	}
+
+	eng, err := engine.NewEngine("rules", enabledRules)
+	if err != nil {
+		db.Model(&t).Update("Status", "FAILED")
+		broadcastTasks() // Notify failed
+		return
+	}
+
+	vulns, err := eng.ScanDirectory(t.ScanPath)
+	if err != nil {
+		db.Model(&t).Update("Status", "FAILED")
+		broadcastTasks() // Notify failed
+		return
+	}
+
+	// Save results
+	for _, v := range vulns {
+		stepsBytes, _ := json.Marshal(v.Steps)
+		rec := VulnerabilityRecord{
+			TaskID:      t.ID,
+			RuleID:      v.RuleID,
+			RuleName:    v.RuleName,
+			Severity:    v.Severity,
+			FilePath:    v.FilePath,
+			LineNumber:  v.LineNumber,
+			Snippet:     v.Snippet,
+			LineContent: v.LineContent,
+			StepsJSON:   string(stepsBytes),
+		}
+		db.Create(&rec)
+	}
+
+	db.Model(&t).Updates(map[string]interface{}{
+		"Status":    "COMPLETED",
+		"VulnCount": len(vulns),
+	})
+	broadcastTasks() // Notify completed
+
+	if t.AIEnabled {
+		performAIAudit(t.ID, t.ScanPath)
+	}
 }
 
 func deleteTasks(c *gin.Context) {

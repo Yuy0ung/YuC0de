@@ -1293,10 +1293,11 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 								})
 
 								// Add Propagation step for the Parameter Entry in the callee
+								paramStr := strings.Join(methodInfo.Parameters, ", ")
 								callerSteps = append(callerSteps, Step{
 									FilePath:    toRelative(path, rootDir),
 									LineNumber:  methodInfo.StartLine,
-									LineContent: "public " + methodInfo.ReturnType + " " + methodInfo.Name + "(...)",
+									LineContent: "public " + methodInfo.ReturnType + " " + methodInfo.Name + "(" + paramStr + ")",
 									Description: "Propagation: 传播 跨方法追踪 - 参数 " + paramName + " 传递自 " + cClass + "." + cMethod,
 								})
 								// Append intermediate steps if any (from current context) - but we don't have them here
@@ -1315,10 +1316,11 @@ func graphTraceBack(path string, lines []string, startIndex int, targetVar strin
 
 			// Only report as Source if it's a Controller/Entry point
 			if isControllerOrEntryClass(methodInfo.ClassName, path) {
+				paramStr := strings.Join(methodInfo.Parameters, ", ")
 				return []Step{{
 					FilePath:    toRelative(path, rootDir),
 					LineNumber:  methodInfo.StartLine,
-					LineContent: "public " + methodInfo.ReturnType + " " + methodInfo.Name + "(...)",
+					LineContent: "public " + methodInfo.ReturnType + " " + methodInfo.Name + "(" + paramStr + ")",
 					Description: "Source: 参数入口 " + paramName,
 				}}, true
 			}
@@ -1593,9 +1595,9 @@ func resolveVariableType(lines []string, currentIndex int, varName string) strin
 					newIdx := strings.Index(rhs, "new ")
 					if newIdx != -1 {
 						rest := rhs[newIdx+4:]
-						// Type is until "(" or "<" (if we want raw type)
-						// Actually we want full type including generics if possible, but raw type is safer for matching
-						endIdx := strings.IndexAny(rest, "(<")
+						// Type is until "("
+						// We want full type including generics if possible
+						endIdx := strings.Index(rest, "(")
 						if endIdx != -1 {
 							return strings.TrimSpace(rest[:endIdx])
 						}
@@ -1861,5 +1863,10 @@ func isTypeCompatible(actualType, expectedType string) bool {
 
 func simpleName(fullName string) string {
 	parts := strings.Split(fullName, ".")
-	return parts[len(parts)-1]
+	simple := parts[len(parts)-1]
+	// Strip generics for simple name comparison
+	if idx := strings.Index(simple, "<"); idx != -1 {
+		return simple[:idx]
+	}
+	return simple
 }
